@@ -1,135 +1,77 @@
-## Certipy-ACL
-LDAP-first ACL enumeration for identifying actionable privilege escalation paths in Active Directory.
+## ACEVision
+Active Directory control relationship auditing and ACL visibility framework.
 
-Certipy-ACL is a focused enumeration tool that queries and parses `nTSecurityDescriptor` over LDAP to resolve effective ACL abuse rights without relying on broad object collection.
+ACEVision is an Active Directory auditing tool focused on exposing effective control relationships directly from LDAP security descriptors.
 
-It identifies privilege escalation primitives such as:
-
-| Privilege | Meaning |
-|----------|--------|
-| WriteOwner | Take ownership |
-| WriteDACL | Modify permissions |
-| GenericAll | Full control |
-| GenericWrite | Modify attributes |
-| AddSelf | Add to group |
-| DCSync | Replicate domain secrets |
-| ForceChangePassword | Reset user password |
+Rather than abstracting privilege escalation into simplified attack paths, ControlMap helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over AD objects.
 
 ---
 
-<img width="600" height="700" alt="image" src="https://github.com/user-attachments/assets/098a04a2-eb13-4cdd-a26a-38d1264d5dec" />
+## Philosophy
+
+Modern Active Directory tooling often prioritizes automated exploitation or high-level graph relationships.
+
+ACEVision focuses on visibility and understanding.
+
+The goal is to help answer questions like:
+
+* Who effectively controls this object?
+* Which ACE grants that control?
+* Which SID owns the object?
+* Why does BloodHound show this escalation path?
+* Which permissions allow privilege escalation?
+* How do LDAP security descriptors translate into real-world control?
 
 ---
 
-## PoC
+## Features
 
-Certipy-ACL operates on SIDs (Security Identifiers).  
-You are expected to obtain valid SIDs during enumeration.
+* Enumerate LDAP security descriptors
+* Parse DACL ACE entries
+* Resolve SIDs to human-readable identities
+* Audit effective control relationships
+* Detect escalation-relevant permissions:
 
-Common methods:
+  * GenericAll
+  * GenericWrite
+  * WriteOwner
+  * WriteDACL
+* Analyze Active Directory object ownership
+* Audit AD CS template permissions
+* Filter ACEs by SID or target object
+* Educational-friendly ACE visibility
+* BloodHound relationship validation
 
-### 🔹 Impacket-lookup.sid
-```bash
-lookupsid.py $domain.htb/$user:$psswd@$target
-```
-<img width="600" height="1010" alt="image" src="https://github.com/user-attachments/assets/d1acabed-b67f-42f5-a94b-94e6b73ae1fc" />
+---
 
-## SID Example
-<img width="500" height="169" alt="image" src="https://github.com/user-attachments/assets/c58d3050-3b95-490b-891b-6265c999d8ce" />
+## Why ACEVision?
 
-##  Example Syntax
+Many AD tools simplify privilege escalation into graph edges or attack paths.
+
+ACEVision exposes the raw access control relationships underneath those paths.
+
+Instead of only showing:
 
 ```text
-certipy-acl --auth ntlm  -u $user@$domain.htb -p $psswd -d $domain.htb --dc-ip $target --filter-sid $taget_sid --resolve-sid
+UserA → GenericAll → UserB
 ```
 
-<img width="1322" height="600" alt="image" src="https://github.com/user-attachments/assets/cbc36799-bdd9-436e-9075-0efae73a951d" />
+ACEVision focuses on showing:
 
-## BloodHound Data
-<img width="625" height="441" alt="image" src="https://github.com/user-attachments/assets/05712971-53ca-4558-8095-affbe4d02ea2" />
+* The actual ACE
+* The actual SID
+* The actual LDAP object
+* The actual access mask
+* The actual permission granting control
 
-michael → can reset password of → Benjamin Brown
+This makes the tool useful for:
 
-
-## Why use this?
-
--  **Attack-focused output** — shows what you can actually abuse
--  **Quiet enumeration** — minimal LDAP noise
--  **Targeted scanning** — filter by SID or DN
--  **BloodHound-aligned** — same privilege concepts, live from LDAP
-
-
-
-##  Quick Start
-
-```bash
-git clone https://github.com/xploitnik/certipy-acl.git
-cd certipy-acl
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -e .
-```
-
----
-
-##  Usage
-
-###  Basic enumeration
-```bash
-certipy-acl -u $user@$domain -p $psswd -dc-ip $target
-```
-
-###  Filter by SID (Recommended - scope ACL by Domain SID and RID)
-```bash
-certipy-acl --auth ntlm  -u $user@$domain.htb -p $psswd -d $domain.htb --dc-ip $target --filter-sid $target_sid --resolve-sid
-```
-
-###  Limit scope to a DN
-```bash
-certipy-acl -u $user@$domain -p $psswd -dc-ip $target \
-  --target-dn "CN=Users,DC=domain,DC=local"
-```
-
-###  Show only escalation paths
-```bash
-certipy-acl ... --only-escalation
-```
-
----
-
----
-
-##  Auth Options
-
-- NTLM (user + password)
-- Kerberos (recommended for OPSEC)
-
----
-
-##  OPSEC Tip
-
-Use Kerberos whenever possible:
-
-```bash
-export KRB5CCNAME=...
-certipy-acl -k ...
-```
-
----
-
-##  Goal
-
-Certipy-ACL is built to answer one question:
-
-> **"What can I abuse right now?"**
-
----
-
-## Author
-
-Built for red teamers, CTF players, and operators who want **signal over noise**.
+* Active Directory auditing
+* Security research
+* Red team analysis
+* Blue team validation
+* Educational demonstrations
+* ACL troubleshooting
 
 
 
