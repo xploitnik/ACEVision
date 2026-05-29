@@ -6,8 +6,6 @@ Instead of only showing attack paths, ACEVision parses live LDAP security descri
 <img width="650" height="302" alt="image" src="https://github.com/user-attachments/assets/9701f596-bd91-438a-9aaa-43d1292a5b0d" />
 
 
-ACEVision is an Active Directory auditing tool focused on exposing effective control relationships directly from LDAP security descriptors.
-
 Rather than abstracting privilege escalation into simplified attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over AD objects.
 
 ---
