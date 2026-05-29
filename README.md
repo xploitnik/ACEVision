@@ -17,18 +17,6 @@ Clone the repository and install the dependencies:
 git clone https://github.com/xploitnik/ACEVision.git
 cd ACEVision
 
-poetry install
-poetry shell
-```
-
-Run ACEVision against a target domain:
-
-```bash
-acevision \
-  -u ryan \
-  -p 'Password123!' \
-  -d sequel.htb \
-  --dc-ip 10.129.242.173
 ```
 
 Filter results to a specific SID:
@@ -40,28 +28,6 @@ acevision \
   -d sequel.htb \
   --dc-ip 10.129.242.173 \
   --filter-sid S-1-5-21-548670397-972687484-3496335370-1114
-```
-
-Resolve SIDs to human-readable names:
-
-```bash
-acevision \
-  -u ryan \
-  -p 'Password123!' \
-  -d sequel.htb \
-  --dc-ip 10.129.242.173 \
-  --resolve-sids
-```
-
-Display only escalation-relevant permissions:
-
-```bash
-acevision \
-  -u ryan \
-  -p 'Password123!' \
-  -d sequel.htb \
-  --dc-ip 10.129.242.173 \
-  --only-escalation
 ```
 
 For additional examples and advanced usage, see:
