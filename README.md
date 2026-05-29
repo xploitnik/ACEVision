@@ -1,12 +1,11 @@
 ## ACEVision
 ACEVision reveals the exact ACE granting control in Active Directory.
 
-Instead of only showing attack paths, ACEVision parses live LDAP security descriptors and identifies the permissions responsible for object control.
+Instead of only displaying attack paths, ACEVision parses live LDAP security descriptors to identify the exact permissions responsible for object control.
 
 <img width="650" height="302" alt="image" src="https://github.com/user-attachments/assets/9701f596-bd91-438a-9aaa-43d1292a5b0d" />
 
-
-Rather than abstracting privilege escalation into simplified attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over AD objects.
+Rather than reducing privilege escalation to graph edges and attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over Active Directory objects.
 
 ---
 
