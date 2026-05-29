@@ -1,7 +1,7 @@
 ## ACEVision
 Active Directory control relationship auditing and ACL visibility framework.
 
-<img width="775" height="312" alt="image" src="https://github.com/user-attachments/assets/e9cb0275-6b8f-4ec6-9d38-7d478ef790cb" />
+<img width="753" height="316" alt="image" src="https://github.com/user-attachments/assets/f8761ca2-b097-461c-a72f-faf91a59a69c" />
 
 
 ACEVision is an Active Directory auditing tool focused on exposing effective control relationships directly from LDAP security descriptors.
