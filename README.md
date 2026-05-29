@@ -16,6 +16,8 @@ Clone the repository and install the dependencies:
 ```bash
 git clone https://github.com/xploitnik/ACEVision.git
 cd ACEVision
+pip install .
+acevision
 
 ```
 
