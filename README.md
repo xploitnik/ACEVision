@@ -48,6 +48,8 @@ The goal is to help answer questions like:
 
 ---
 
+
+
 ## Why ACEVision?
 
 Many AD tools simplify privilege escalation into graph edges or attack paths.
