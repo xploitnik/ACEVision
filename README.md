@@ -1,6 +1,7 @@
 ## ACEVision
-Active Directory control relationship auditing and ACL visibility framework.
+ACEVision reveals the exact ACE granting control in Active Directory.
 
+Instead of only showing attack paths, ACEVision parses live LDAP security descriptors and identifies the permissions responsible for object control.
 
 <img width="650" height="302" alt="image" src="https://github.com/user-attachments/assets/9701f596-bd91-438a-9aaa-43d1292a5b0d" />
 
