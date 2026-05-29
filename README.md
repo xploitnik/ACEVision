@@ -7,7 +7,7 @@ Active Directory control relationship auditing and ACL visibility framework.
 
 ACEVision is an Active Directory auditing tool focused on exposing effective control relationships directly from LDAP security descriptors.
 
-Rather than abstracting privilege escalation into simplified attack paths, ControlMap helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over AD objects.
+Rather than abstracting privilege escalation into simplified attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over AD objects.
 
 ---
 
