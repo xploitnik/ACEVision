@@ -1,7 +1,7 @@
 # certipy_tool/auth.py
 # -*- coding: utf-8 -*-
 #
-# LDAP socket for Certipy-ACL:
+# LDAP socket for ACEVision:
 #  - NTLM simple bind (DOMAIN\user) on ldap:// or ldaps://
 #  - Kerberos SASL/GSSAPI bind using the caller's ccache (kinit / KRB5CCNAME)
 #  - get_effective_control_entries(): returns [(dn, SR_SECURITY_DESCRIPTOR)]
@@ -38,13 +38,22 @@ class LDAPSocket:
         disable_referrals: bool = True,
     ):
         """
-        target: host/IP or FQDN to connect to (if using --dc-ip you may pass IP here)
-        username/password: used for NTLM only (username may be UPN or sAMAccountName)
-        domain: domain FQDN (e.g. rustykey.htb)
-        auth_method: "ntlm" (default) or "kerberos"
-        ccache: optional path to Kerberos ccache file (sets KRB5CCNAME)
-        dc_fqdn: prefer to connect to this FQDN (important for Kerberos SPN ldap/<fqdn>)
-        starttls: negotiate StartTLS on plain ldap (389) if not using LDAPS
+        ACEVision LDAP wrapper.
+
+        Supports:
+        - NTLM authentication
+        - Kerberos authentication through SASL/GSSAPI
+        - LDAP, LDAPS, and optional StartTLS
+        - Security descriptor retrieval
+        - SID resolution
+
+        target: host/IP or FQDN to connect to
+        username/password: used for NTLM only
+        domain: domain FQDN, e.g. certified.htb
+        auth_method: "ntlm" or "kerberos"
+        ccache: optional Kerberos ccache path
+        dc_fqdn: preferred FQDN for Kerberos SPN ldap/<fqdn>
+        starttls: negotiate StartTLS on LDAP 389 if not using LDAPS
         """
         self.target = target
         self.username = username or ""
@@ -59,19 +68,19 @@ class LDAPSocket:
         self.network_timeout = network_timeout
         self.disable_referrals = disable_referrals
 
-        # Choose LDAP host:
-        # - For Kerberos, prefer FQDN that matches SPN: ldap/<fqdn>
         ldap_host = self.dc_fqdn or self.target
 
-        # Server object (ldap:// or ldaps://)
-        server = Server(ldap_host, use_ssl=self.use_ldaps, get_info=ALL, connect_timeout=self.network_timeout)
+        server = Server(
+            ldap_host,
+            use_ssl=self.use_ldaps,
+            get_info=ALL,
+            connect_timeout=self.network_timeout,
+        )
 
         if self.auth_method == "kerberos":
-            # optionally set KRB5CCNAME to a provided ccache path
             if self.ccache:
                 os.environ["KRB5CCNAME"] = self.ccache
 
-            # Prepare connection for SASL/GSSAPI (do not auto_bind yet if we might StartTLS)
             self.conn = Connection(
                 server,
                 authentication=SASL,
@@ -80,23 +89,21 @@ class LDAPSocket:
                 read_only=True,
             )
 
-            # If requested and not using LDAPS, negotiate StartTLS before bind
             if not self.use_ldaps and self.starttls:
                 self.conn.open()
                 self.conn.start_tls()
 
-            # Perform the SASL bind (uses Kerberos ccache)
             if not self.conn.bind():
-                raise RuntimeError(f"[AUTH] Kerberos (GSSAPI) bind failed: {self.conn.last_error}")
+                raise RuntimeError(
+                    f"[AUTH] Kerberos (GSSAPI) bind failed: {self.conn.last_error}"
+                )
 
             print("[AUTH] LDAP Kerberos (GSSAPI) bind successful.")
 
         elif self.auth_method == "ntlm":
-            # Build NTLM principal: DOMAIN\user
             user_part = self.username.split("@", 1)[0]
             ntlm_user = f"{self.domain.split('.')[0].upper()}\\{user_part}"
 
-            # NTLM simple bind (auto_bind=False to allow StartTLS negotiation)
             self.conn = Connection(
                 server,
                 user=ntlm_user,
@@ -106,13 +113,14 @@ class LDAPSocket:
                 read_only=True,
             )
 
-            # If requested and not using LDAPS, negotiate StartTLS before bind
             if not self.use_ldaps and self.starttls:
                 self.conn.open()
                 self.conn.start_tls()
 
             if not self.conn.bind():
-                raise RuntimeError(f"[AUTH] NTLM/simple bind failed: {self.conn.last_error}")
+                raise RuntimeError(
+                    f"[AUTH] NTLM/simple bind failed: {self.conn.last_error}"
+                )
 
             print("[AUTH] LDAP bind successful (NTLM).")
 
@@ -121,7 +129,6 @@ class LDAPSocket:
 
         self.base_dn = domain_to_base_dn(self.domain)
 
-        # Disable referrals by default for consistent single-DC enumeration
         try:
             if self.disable_referrals and hasattr(self.conn, "strategy"):
                 self.conn.strategy.referrals = False
@@ -133,11 +140,11 @@ class LDAPSocket:
         Return a list of (DN, SR_SECURITY_DESCRIPTOR) for the domain subtree.
         Only requests the DACL (sdflags=0x04) for performance.
         """
-        controls = security_descriptor_control(sdflags=0x04)  # DACL only
+        controls = security_descriptor_control(sdflags=0x04)
         who = self.username or "kerberos"
+
         print(f"[AUTH] Searching objects with ACLs for {who}@{self.domain}...")
 
-        # subtree search
         self.conn.search(
             search_base=self.base_dn,
             search_filter="(objectClass=*)",
@@ -147,13 +154,13 @@ class LDAPSocket:
         )
 
         entries = []
+
         for entry in self.conn.entries:
             try:
                 raw_sd = entry["nTSecurityDescriptor"].raw_values[0]
                 sd = SR_SECURITY_DESCRIPTOR(raw_sd)
                 entries.append((entry.entry_dn, sd))
             except Exception:
-                # no SD or failed to decode
                 continue
 
         return entries
@@ -168,7 +175,6 @@ class LDAPSocket:
             sid_obj.fromCanonical(sid_str)
             sid_bytes = sid_obj.getData()
 
-            # construct escaped hex filter (\xx\xx...)
             hex_esc = "".join("\\{:02x}".format(b) for b in sid_bytes)
             flt = f"(objectSid={hex_esc})"
 
@@ -183,6 +189,7 @@ class LDAPSocket:
                 return sid_str
 
             e = self.conn.entries[0]
+
             for attr in ("sAMAccountName", "cn", "distinguishedName"):
                 try:
                     val = str(e[attr])
@@ -190,7 +197,9 @@ class LDAPSocket:
                         return val
                 except Exception:
                     continue
+
             return sid_str
+
         except Exception:
             return sid_str
 
