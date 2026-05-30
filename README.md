@@ -24,7 +24,7 @@ acevision
 Filter results to a specific SID:
 
 ```bash
-acevision \
+acevision --auth ntlm \
   -u ryan \
   -p 'Password123!' \
   -d sequel.htb \
