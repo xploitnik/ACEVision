@@ -165,6 +165,58 @@ This allows operators to validate privilege escalation paths directly from LDAP 
 
 ---
 
+# SID-Centric Analysis
+
+One of the key advantages of ACEVision is the ability to investigate Active Directory permissions from the perspective of a SID rather than an account.
+
+After validating the WriteOwner relationship between `judith.mader` and the `Management` group, the analysis was shifted to the Management group's SID directly.
+
+```text
+Management SID:
+S-1-5-21-729746778-2675978091-3820388244-1104
+```
+
+Importantly, this did not require possession of the Management group's credentials.
+
+ACEVision was executed using the credentials of `judith.mader`, while targeting the SID belonging to the Management group.
+
+As long as the authenticated user can read LDAP security descriptors, ACEVision can enumerate ACEs associated with users, groups, service accounts, and computer accounts throughout the directory.
+
+This enables operators to investigate control relationships across Active Directory without first compromising every account in the escalation chain.
+
+## Screenshot
+
+![SID-Centric Analysis](../images/certified-htb/sid-centric-analysis.png)
+
+## Why This Matters
+
+Traditional workflows often focus on accounts:
+
+```text
+User
+ ↓
+Privilege
+ ↓
+Target
+```
+
+ACEVision enables a SID-centric workflow:
+
+```text
+Identify SID
+ ↓
+Analyze ACEs
+ ↓
+Understand Control
+ ↓
+Map Relationships
+```
+
+This allows operators to move through an Active Directory environment by investigating control relationships directly from LDAP ACL data rather than relying exclusively on account ownership.
+
+In this example, the Management group's SID was analyzed without requiring the group's credentials, demonstrating how ACEVision can be used to investigate the next stage of an escalation path before compromising the corresponding account.
+
+
 # Lessons Learned
 
 This case study highlights several important Active Directory concepts:
