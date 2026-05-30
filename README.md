@@ -116,16 +116,6 @@ This makes the tool useful for:
 
 ---
 
-# Documentation
-
-Additional documentation can be found in:
-
-* docs/guides/
-* docs/reference/
-* docs/case-studies/
-
----
-
 # License
 
 Released under the MIT License.
