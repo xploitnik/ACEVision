@@ -39,9 +39,10 @@ acevision \
 
 For additional examples and advanced usage, see:
 
-* docs/guides/basic-commands.md
-* docs/guides/kerberos-authentication.md
-* docs/case-studies/
+- [Basic Commands](docs/guides/basic-commands.md)
+- [Finding SIDs](docs/guides/finding-sids.md)
+- [Kerberos Authentication](docs/guides/kerberos-authentication.md)
+- [Case Studies](docs/case-studies/)
 
 ---
 
