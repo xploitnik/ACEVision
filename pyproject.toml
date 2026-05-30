@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "certipy-acl"
+name = "acevision"
 version = "0.1.0"
-description = "Lightweight LDAP ACL mapper for AD (stealthy, single LDAP bind)."
+description = "Reveal the exact ACEs behind Active Directory control relationships."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Judith Mader (xpl0itnik)" }]
@@ -13,11 +13,11 @@ requires-python = ">=3.8"
 dependencies = ["ldap3>=2.9", "impacket>=0.11.0"]
 
 [project.urls]
-Homepage = "https://github.com/xploitnik/certipy-acl"
-Issues = "https://github.com/xploitnik/certipy-acl/issues"
+Homepage = "https://github.com/xploitnik/ACEVision"
+Issues = "https://github.com/xploitnik/ACEVision/issues"
 
 [project.scripts]
-certipy-acl = "certipy_tool.__main__:main"
+acevision = "certipy_tool.__main__:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
