@@ -60,6 +60,8 @@ The goal is to help answer questions like:
 * Which permissions are responsible?
 * How do LDAP security descriptors translate into real-world control?
 
+ACEVision encourages a SID-centric investigation workflow, allowing operators to analyze control relationships throughout Active Directory without first compromising every account in the escalation chain.
+
 ---
 
 # Features
