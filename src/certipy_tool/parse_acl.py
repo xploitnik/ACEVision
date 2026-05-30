@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+#
+# ACEVision - Active Directory ACE analysis engine
+#
 from typing import Callable, Iterable, List, Optional, Tuple
 import uuid
 
@@ -57,20 +60,15 @@ ACE_TYPE_NAMES = {
 
 SE_DACL_PRESENT = 0x0004
 
-# ACE types that may contain ObjectType / InheritedObjectType
 OBJECT_ACE_TYPES = {0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0F}
 
 ACE_OBJECT_TYPE_PRESENT = 0x01
 ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x02
 
-# === Extended Rights GUIDs ===
 EXTENDED_RIGHTS_GUIDS = {
-    # DCSync-related
     "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2": "DS-Replication-Get-Changes",
     "1131f6ab-9c07-11d1-f79f-00c04fc2dcd2": "DS-Replication-Get-Changes-All",
     "89e95b76-444d-4c62-991a-0facbeda640c": "DS-Replication-Get-Changes-In-Filtered-Set",
-
-    # Password reset / BloodHound ForceChangePassword
     "00299570-246d-11d0-a768-00aa006e0529": "User-Force-Change-Password",
 }
 
@@ -97,7 +95,7 @@ def _ace_type_name(t: int) -> str:
 
 def _mask_to_int(mask_obj) -> int:
     """
-    Convierte impacket.ACCESS_MASK a int de forma robusta.
+    Convert impacket ACCESS_MASK to int safely.
     """
     if isinstance(mask_obj, int):
         return mask_obj
@@ -121,7 +119,7 @@ def _mask_to_int(mask_obj) -> int:
     except Exception:
         pass
 
-    raise TypeError(f"No pude convertir ACCESS_MASK a int: {type(mask_obj)}")
+    raise TypeError(f"Could not convert ACCESS_MASK to int: {type(mask_obj)}")
 
 
 def _decode_rights(mask: int) -> List[str]:
@@ -202,9 +200,7 @@ def _get_dacl(sd) -> Optional[object]:
 
 def _extract_object_type_guid(ace) -> Optional[str]:
     """
-    Extrae ObjectType desde ACEs tipo objeto de Impacket.
-    Impacket suele guardarlo como 16 bytes crudos si Flags incluye
-    ACE_OBJECT_TYPE_PRESENT.
+    Extract ObjectType GUID from object ACEs parsed by Impacket.
     """
     try:
         ace_type = ace["AceType"]
@@ -279,8 +275,8 @@ def _is_force_change_password_guid(object_type_guid: Optional[str]) -> bool:
 
 def _is_object_ace_with_control_access(ace) -> bool:
     """
-    Detecta ACEs objeto cuyo mask contiene ControlAccess (0x100).
-    Útil para depuración si el GUID no se logra resolver.
+    Detect object ACEs where the mask includes ControlAccess (0x100).
+    Useful for debugging if the GUID cannot be resolved yet.
     """
     try:
         ace_type = ace["AceType"]
@@ -333,19 +329,22 @@ def parse_acl_entries(
 
         dacl = _get_dacl(sd)
         aces = getattr(dacl, "aces", None) if dacl is not None else None
+
         if not dacl or not aces:
             try:
                 ctrl = getattr(sd, "Control", 0)
                 present = bool(ctrl & SE_DACL_PRESENT)
-                print(f"    [!] No DACL o no hay ACEs presentes (SE_DACL_PRESENT={present})")
+                print(f"    [!] No DACL or no ACEs present (SE_DACL_PRESENT={present})")
             except Exception:
-                print("    [!] No DACL o no hay ACEs presentes")
+                print("    [!] No DACL or no ACEs present")
             continue
 
         printed = False
+
         for ace in aces:
             try:
                 sid = ace["Ace"]["Sid"].formatCanonical()
+
                 if filter_sid and sid != filter_sid:
                     continue
 
@@ -373,6 +372,7 @@ def parse_acl_entries(
                 print("  🔐 ACE Summary:")
                 print(f"    ACE Type:       {_ace_type_name(acetype)}")
                 print(f"    SID:            {sid}")
+
                 resolved = _resolve_sid_safe(sid, resolve_sid)
                 print(f"    Resolved SID:   {resolved}")
                 print(f"    Mask (hex):     {hex(mask)}")
@@ -387,7 +387,7 @@ def parse_acl_entries(
                     print(f"    ExtendedRight:  {extended_right}")
 
                 if friendly_object_label:
-                    print(f"    BloodHound:   {friendly_object_label}")
+                    print(f"    BloodHound:     {friendly_object_label}")
 
                 if is_dcsync:
                     print("    [!] DCSync-capable permission detected")
@@ -396,19 +396,21 @@ def parse_acl_entries(
                     print("    [!] ForceChangePassword-capable permission detected")
 
                 if is_control_access_object_ace and not extended_right:
-                    print("    [i] Object ACE con ControlAccess detectado, pero el GUID no se resolvió todavía.")
+                    print("    [i] Object ACE with ControlAccess detected, but GUID was not resolved yet.")
 
                 print("    Rights:")
+
                 if rights:
                     for r in rights:
                         print(f"      ✅ {r}")
                 else:
-                    print("      – (no se reconocieron derechos clásicos en esta máscara)")
+                    print("      – No classic rights were recognized in this mask")
 
                 if unknown_bits:
-                    print(f"      … Bits desconocidos: {hex(unknown_bits)}")
+                    print(f"      … Unknown bits: {hex(unknown_bits)}")
 
                 kk = _key_rights(mask, bh_compat)
+
                 print("    Key rights (quick check):")
                 print(_format_bool("  WriteOwner", kk["WriteOwner"]))
                 print(_format_bool("  WriteDACL", kk["WriteDACL"]))
@@ -428,23 +430,23 @@ def parse_acl_entries(
                     print(_format_bool("  GenericWrite", False))
 
                 if (not kk["GenericWrite_direct"]) and kk["GenericWrite_derived"]:
-                    print("    [i] GenericWrite (derived) inferido por WriteProperty/Self (compatibilidad BH).")
+                    print("    [i] GenericWrite (derived) inferred from WriteProperty/Self (BH compatibility).")
 
                 if is_dcsync:
-                    print("    [i] Este ACE concede permisos de replicación críticos sobre el objeto dominio.")
+                    print("    [i] This ACE grants critical replication permissions over the domain object.")
 
                 if is_force_change_password:
-                    print("    [i] Este ACE concede Reset Password / ForceChangePassword sobre el objeto usuario.")
+                    print("    [i] This ACE grants Reset Password / ForceChangePassword over the user object.")
 
                 print("")
 
             except Exception as e:
-                print(f"    [!] Error al procesar ACE: {e}")
+                print(f"    [!] Error processing ACE: {e}")
 
         if filter_sid and not printed:
-            print(f"    [!] No hay ACEs que referencien SID {filter_sid} en este objeto.")
+            print(f"    [!] No ACEs referencing SID {filter_sid} were found on this object.")
         elif not printed:
-            print("    [!] No hay ACEs relevantes para mostrar con los filtros actuales.")
+            print("    [!] No relevant ACEs to display with the current filters.")
 
 
 def enumerate_acls_for_sid(
@@ -456,31 +458,55 @@ def enumerate_acls_for_sid(
     bh_compat: bool = True,
 ) -> None:
     entries = sock.get_effective_control_entries()
+
     if target_dn:
-        entries = [(dn, sd) for dn, sd in entries if _is_dn_under(dn, target_dn)]
-    parse_acl_entries(entries, filter_sid, resolve_sid, only_escalation, bh_compat)
+        entries = [
+            (dn, sd)
+            for dn, sd in entries
+            if _is_dn_under(dn, target_dn)
+        ]
+
+    parse_acl_entries(
+        entries,
+        filter_sid,
+        resolve_sid,
+        only_escalation,
+        bh_compat
+    )
 
 
 def check_writeowner_for_dn(sock, target_dn: str, sid: str) -> bool:
     entries = sock.get_effective_control_entries()
+
     for dn, sd in entries:
         if dn.lower() != target_dn.lower():
             continue
+
         dacl = _get_dacl(sd)
         aces = getattr(dacl, "aces", None) if dacl else None
+
         if not aces:
             continue
+
         for ace in aces:
             try:
                 if ace["Ace"]["Sid"].formatCanonical() != sid:
                     continue
+
                 mask = _mask_to_int(ace["Ace"]["Mask"])
                 has_wo = bool(mask & 0x00080000)
-                print(f"[CHECK] {dn} — SID {sid} WriteOwner: {'YES' if has_wo else 'NO'} (mask={hex(mask)})")
+
+                print(
+                    f"[CHECK] {dn} — SID {sid} WriteOwner: "
+                    f"{'YES' if has_wo else 'NO'} (mask={hex(mask)})"
+                )
+
                 return has_wo
+
             except Exception:
                 continue
-    print(f"[CHECK] {target_dn} — no se encontró ACE para SID {sid}")
+
+    print(f"[CHECK] {target_dn} — no ACE found for SID {sid}")
     return False
 
 
