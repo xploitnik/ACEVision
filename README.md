@@ -1,31 +1,142 @@
+
 # ACEVision
 
 Active Directory control relationship auditing and ACL visibility framework.
 
-ACEVision reveals the exact ACE granting control in Active Directory.
+ACEVision reveals the exact ACE granting control in Active Directory and explains what that control means.
 
-Instead of only displaying attack paths, ACEVision parses live LDAP security descriptors to identify the exact permissions responsible for object control.
+Instead of only displaying attack paths, ACEVision parses live LDAP security descriptors to identify:
 
-<img width="650" height="302" alt="image" src="https://github.com/user-attachments/assets/9701f596-bd91-438a-9aaa-43d1292a5b0d" />
-
-Rather than reducing privilege escalation to graph edges and attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over Active Directory objects.
-
-ACEVision supports both NTLM and Kerberos authentication for Active Directory ACL visibility and control relationship analysis.
+- Object Type
+- Trigger Right
+- Effective Permissions
+- Recommended DACL Modifications
+- Recommended Abuse Paths
+- Potential Outcomes
+- Suggested Attack Flows
 
 ---
 
-# Quick Start
+![ACEVision Hero](docs/images/hero_img/hero_img.png)
+
+---
+
+## ACEVision Advisor
+
+ACEVision Advisor transforms raw ACL data into actionable Active Directory context.
+
+Given an ACE, ACEVision can:
+
+- Detect the target object type
+- Identify the escalation-triggering permission
+- Recommend the next DACL modification
+- Recommend an abuse path
+- Estimate impact and confidence
+- Explain the expected attack flow
+
+### Advisor Workflow
+
+```text
+Object Type
+     ↓
+Trigger Right
+     ↓
+ACEVision Advisor
+     ↓
+Recommended DACL
+     ↓
+Potential Outcomes
+     ↓
+Suggested Flow
+```
+
+Rather than reducing privilege escalation to graph edges and attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over Active Directory objects.
+
+---
+
+## Validation Framework
+
+ACEVision Advisor recommendations have been validated against real Active Directory privilege escalation paths.
+
+### Currently Validated
+
+| Right | Object Type | Status |
+|---------|---------|---------|
+| WriteOwner | User | ✅ |
+| WriteOwner | Group | ✅ |
+| GenericAll | User | ✅ |
+| GenericWrite | User | ✅ |
+| ForceChangePassword | User | ✅ |
+| DCSync | Domain | ✅ |
+| WriteDACL | Domain | ✅ |
+
+Validation screenshots are available under:
+
+```text
+docs/validation/
+```
+
+---
+
+## BloodHound Comparisons
+
+BloodHound and ACEVision serve different purposes.
+
+### BloodHound
+
+Answers:
+
+- What relationship exists?
+- Which object controls another object?
+- Which attack path is possible?
+
+### ACEVision
+
+Answers:
+
+- Why does this relationship matter?
+- What should happen next?
+- Which DACL modification is recommended?
+- Which abuse path is available?
+- What is the expected outcome?
+
+> BloodHound shows the relationship.
+>
+> ACEVision explains the relationship.
+
+Comparison screenshots are available under:
+
+```text
+docs/comparisons/
+```
+
+---
+
+## Documentation
+
+Additional documentation:
+
+- docs/validation/
+- docs/comparisons/
+- docs/case-studies/
+- docs/reference/
+- docs/guides/
+
+---
+
+## Quick Start
 
 Clone the repository and install the dependencies:
 
 ```bash
 git clone https://github.com/xploitnik/ACEVision.git
+
 cd ACEVision
 
 pip install -e .
 ```
 
-Filter results to a specific SID:
+Example:
 
 ```bash
 acevision \
@@ -37,88 +148,47 @@ acevision \
     --filter-sid S-1-5-21-...
 ```
 
-For additional examples and advanced usage, see:
+---
 
-- [Basic Commands](docs/guides/basic-commands.md)
-- [Finding SIDs](docs/guides/finding-sids.md)
-- [Kerberos Authentication](docs/guides/kerberos-authentication.md)
-- [Case Studies](docs/case-studies/)
+## Features
+
+- Enumerate LDAP security descriptors
+- Parse DACL ACE entries
+- Resolve SIDs to identities
+- Object Type Detection
+- Trigger Right Detection
+- ACEVision Advisor
+- Recommended DACL Generation
+- Abuse Path Recommendations
+- Confidence Assessment
+- Impact Assessment
+- Suggested Attack Flows
+- Effective Control Analysis
+- BloodHound Relationship Validation
+- NTLM Authentication
+- Kerberos Authentication
+- AD CS ACL Analysis
 
 ---
 
-# Philosophy
+## Philosophy
 
-Modern Active Directory tooling often prioritizes automated exploitation or high-level graph relationships.
+Modern Active Directory tooling often prioritizes attack paths.
 
-ACEVision focuses on visibility and understanding.
+ACEVision focuses on understanding the permissions that create those paths.
 
-The goal is to help answer questions like:
+The goal is to answer questions such as:
 
-* Who actually controls this object?
-* Which ACE grants that control?
-* Which SID owns the object?
-* Why does BloodHound show this escalation path?
-* Which permissions are responsible?
-* How do LDAP security descriptors translate into real-world control?
+- Who actually controls this object?
+- Which ACE grants that control?
+- Why does BloodHound show this edge?
+- Which permission is responsible?
+- What is the next logical escalation step?
 
-ACEVision encourages a SID-centric investigation workflow, allowing operators to analyze control relationships throughout Active Directory without first compromising every account in the escalation chain.
-
----
-
-# Features
-
-* Enumerate LDAP security descriptors
-* Parse DACL ACE entries
-* Resolve SIDs to human-readable identities
-* Audit effective control relationships
-* Detect escalation-relevant permissions:
-
-  * GenericAll
-  * GenericWrite
-  * WriteOwner
-  * WriteDACL
-  * DCSync
-  * ForceChangePassword
-* Analyze Active Directory object ownership
-* Audit AD CS template permissions
-* Filter ACEs by SID or target object
-* Educational-friendly ACL visibility
-* BloodHound relationship validation
-* NTLM and Kerberos authentication support
+ACEVision encourages a SID-centric investigation workflow that allows operators to analyze control relationships throughout Active Directory without first compromising every account in the chain.
 
 ---
 
-# Why ACEVision?
-
-Many AD tools simplify privilege escalation into graph edges or attack paths.
-
-ACEVision exposes the raw access control relationships underneath those paths.
-
-Instead of only showing:
-
-```text
-User → GenericAll → Group
-```
-
-ACEVision focuses on showing:
-
-* The actual ACE
-* The actual SID
-* The actual DACL object
-* The actual access mask
-* The actual permission granting control
-
-This makes the tool useful for:
-
-* Active Directory auditing
-* Security research
-* Red team analysis
-* Blue team validation
-* Educational demonstrations
-* ACL troubleshooting
-
----
-
-# License
+## License
 
 Released under the MIT License.
