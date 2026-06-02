@@ -17,7 +17,7 @@ Instead of only displaying attack paths, ACEVision parses live LDAP security des
 
 ---
 
-![ACEVision Hero](docs/images/hero_img/hero_img.png)
+![ACEVision Hero](docs/images/hero_img/hero_dcsync.png)
 
 ---
 
