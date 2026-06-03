@@ -1,4 +1,25 @@
 # HTB Certified — ACEVision Case Study
+> **Version Note**
+>
+> This case study was created using an earlier version of ACEVision before the introduction of:
+>
+> * Object Type Detection
+> * Trigger Right Detection
+> * ACEVision Advisor
+> * Recommended Abuse Paths
+> * Potential Outcomes
+> * Suggested Attack Flows
+>
+> The ACL analysis, SID relationships, and privilege escalation findings documented in this case study remain valid.
+>
+> The screenshots shown throughout this document reflect the ACEVision output available at the time the research was performed.
+>
+> For examples of the current ACEVision Advisor output, see:
+>
+> * `docs/validation/`
+> * `docs/comparisons/`
+>
+> These directories contain validation screenshots and BloodHound comparisons generated using the latest version of ACEVision.
 
 ## Overview
 
@@ -237,4 +258,22 @@ ACEVision successfully identified the ACCESS_ALLOWED ACE granting WriteOwner ove
 By exposing the exact trustee, object, and permission responsible for the relationship, ACEVision transforms abstract graph relationships into concrete, auditable LDAP permissions.
 
 This visibility helps operators, defenders, and students understand not only that a privilege escalation path exists, but why it exists.
+
+## ACEVision Advisor (Current Version)
+
+Since this case study was published, ACEVision has evolved beyond ACL enumeration and now includes an interpretation layer known as **ACEVision Advisor**.
+
+ACEVision Advisor automatically identifies:
+
+* Object Type
+* Trigger Right
+* Recommended DACL Modifications
+* Recommended Abuse Paths
+* Potential Outcomes
+* Suggested Attack Flows
+
+The goal is to help operators understand not only **who controls an object**, but also **what that control means** and **how it may be abused in real-world Active Directory attack paths**.
+
+See the validation and comparison directories for examples generated using the current version.
+
 
