@@ -135,10 +135,10 @@ class LDAPSocket:
         except Exception:
             pass
 
-    def get_effective_control_entries(self) -> List[Tuple[str, SR_SECURITY_DESCRIPTOR]]:
+    def get_effective_control_entries(self):
         """
-        Return a list of (DN, SR_SECURITY_DESCRIPTOR) for the domain subtree.
-        Only requests the DACL (sdflags=0x04) for performance.
+        Return a list of (DN, SR_SECURITY_DESCRIPTOR, object_classes) for the domain subtree.
+        Only requests the DACL (sdflags=0x04) plus objectClass for ACEVision Advisor.
         """
         controls = security_descriptor_control(sdflags=0x04)
         who = self.username or "kerberos"
@@ -149,7 +149,7 @@ class LDAPSocket:
             search_base=self.base_dn,
             search_filter="(objectClass=*)",
             search_scope=SUBTREE,
-            attributes=["nTSecurityDescriptor"],
+            attributes=["nTSecurityDescriptor", "objectClass"],
             controls=controls,
         )
 
@@ -159,7 +159,14 @@ class LDAPSocket:
             try:
                 raw_sd = entry["nTSecurityDescriptor"].raw_values[0]
                 sd = SR_SECURITY_DESCRIPTOR(raw_sd)
-                entries.append((entry.entry_dn, sd))
+                object_classes = []
+
+                try:
+                    object_classes = list(entry["objectClass"].values)
+                except Exception:
+                    object_classes = []
+
+                entries.append((entry.entry_dn, sd, object_classes))
             except Exception:
                 continue
 
