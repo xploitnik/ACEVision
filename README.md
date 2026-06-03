@@ -114,13 +114,23 @@ docs/comparisons/
 
 ## Documentation
 
-Additional documentation:
+### Guides
 
-- docs/validation/
-- docs/comparisons/
-- docs/case-studies/
-- docs/reference/
-- docs/guides/
+- [Basic Commands](docs/guides/basic-commands.md)
+- [Finding SIDs](docs/guides/finding-sids.md)
+- [Kerberos Authentication](docs/guides/kerberos-authentication.md)
+
+### Research
+
+- [HTB Certified Case Study](docs/case-studies/certified.md)
+
+### Validation
+
+- [ACEVision Advisor Validation](docs/validation/README.md)
+
+### Comparisons
+
+- [BloodHound vs ACEVision](docs/comparisons/README.md)
 
 ---
 
