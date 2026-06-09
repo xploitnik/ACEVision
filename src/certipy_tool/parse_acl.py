@@ -1,4 +1,6 @@
 
+
+
 # -*- coding: utf-8 -*-
 #
 # ACEVision - Active Directory ACE analysis engine
@@ -437,6 +439,91 @@ def _impact_color(impact: str) -> str:
 
 
 
+def _assessment_color(assessment: str) -> str:
+    """Color-code advisor assessment labels."""
+    a = (assessment or "").lower()
+    if a in ("privilege escalation", "domain compromise", "critical"):
+        return "red"
+    if a in ("lateral movement", "persistence"):
+        return "yellow"
+    if a == "informational":
+        return "green"
+    return "white"
+
+
+def _is_read_only_ace(mask: int) -> bool:
+    """
+    Identify ACEs that provide visibility but no direct object control.
+
+    Example from Sauna:
+      0x20014 = ListChildren + ReadProperty + ReadControl
+
+    These permissions are useful for enumeration, but they do not directly grant
+    ownership control, DACL control, object modification, password reset, or
+    replication rights.
+    """
+    read_bits = (
+        0x00000004 |  # ListChildren
+        0x00000010 |  # ReadProperty
+        0x00000080 |  # ListObject
+        0x00020000 |  # ReadControl
+        0x80000000    # GenericRead
+    )
+
+    control_or_write_bits = (
+        0x00000001 |  # CreateChild
+        0x00000002 |  # DeleteChild
+        0x00000008 |  # Self
+        0x00000020 |  # WriteProperty
+        0x00000040 |  # DeleteTree
+        0x00000100 |  # ControlAccess
+        0x00010000 |  # Delete
+        0x00040000 |  # WriteDACL
+        0x00080000 |  # WriteOwner
+        0x01000000 |  # AccessSystemSecurity
+        0x10000000 |  # GenericAll
+        0x40000000    # GenericWrite
+    )
+
+    return bool(mask & read_bits) and not bool(mask & control_or_write_bits)
+
+
+def _print_informational_advisor(object_type: str, rights: Optional[List[str]] = None) -> None:
+    """
+    Advisor output for low-impact/read-only findings.
+
+    This prevents beginners from treating every ACE as an attack path while still
+    explaining why the ACE appeared in the output.
+    """
+    _advisor_box_lines()
+
+    print(f"      {_c('Assessment:', 'cyan')} {_c('INFORMATIONAL', _assessment_color('Informational'))}")
+    print(f"      {_c('Confidence:', 'cyan')} {_c('HIGH', _confidence_color('High'))}")
+    print(f"      {_c('Likely Impact:', 'cyan')} {_c('LOW', _impact_color('Low'))}")
+    print("")
+
+    print(f"      {_c('Reason:', 'cyan')}")
+    if object_type == "Domain":
+        print("        Read-only permissions are common on Domain objects.")
+    else:
+        print("        The identified rights provide visibility but not control.")
+    print("        No direct privilege escalation path identified.")
+    print("")
+
+    if rights:
+        print(f"      {_c('Observed Read Rights:', 'cyan')}")
+        for r in rights:
+            print(f"        {_c('•', 'yellow')} {_c(r, 'white')}")
+        print("")
+
+    print(f"      {_c('Recommendation:', 'cyan')}")
+    print("        Continue enumeration.")
+    print("        Prioritize WriteOwner, WriteDACL, GenericAll,")
+    print("        GenericWrite, ForceChangePassword, AddMember,")
+    print("        and DCSync-related rights.")
+
+
+
 
 def _outcome_color(outcome: str) -> str:
     """Color-code potential outcomes for readability."""
@@ -831,6 +918,17 @@ def parse_acl_entries(
     only_escalation: bool = False,
     bh_compat: bool = True,
 ) -> None:
+    """
+    Parse and print ACL entries.
+
+    Noise reduction behavior:
+    - When --filter-sid is used, ACEVision only prints objects where that SID has a matching ACE.
+    - Empty/non-matching objects are suppressed.
+    - If no matching ACEs are found across the search, print one clean summary message.
+    """
+    findings_found = 0
+    objects_with_findings = 0
+
     for entry_data in entries:
         if len(entry_data) == 3:
             dn, sd, object_classes = entry_data
@@ -840,13 +938,17 @@ def parse_acl_entries(
 
         object_type = _classify_object_type(object_classes, dn)
 
-        print(f"[ACL] {dn}")
-        _object_type_box(object_type)
-
         dacl = _get_dacl(sd)
         aces = getattr(dacl, "aces", None) if dacl is not None else None
 
+        # With --filter-sid, suppress empty objects completely.
+        # Without --filter-sid, keep the old visibility for general debugging/enumeration.
         if not dacl or not aces:
+            if filter_sid:
+                continue
+
+            print(f"[ACL] {dn}")
+            _object_type_box(object_type)
             try:
                 ctrl = getattr(sd, "Control", 0)
                 present = bool(ctrl & SE_DACL_PRESENT)
@@ -856,6 +958,7 @@ def parse_acl_entries(
             continue
 
         printed = False
+        header_printed = False
 
         for ace in aces:
             try:
@@ -881,7 +984,14 @@ def parse_acl_entries(
                     ):
                         continue
 
+                if not header_printed:
+                    print(f"[ACL] {dn}")
+                    _object_type_box(object_type)
+                    header_printed = True
+                    objects_with_findings += 1
+
                 printed = True
+                findings_found += 1
                 rights = _decode_rights(mask)
                 unknown_bits = mask & (~ALL_RIGHTS_MASK)
 
@@ -980,17 +1090,34 @@ def parse_acl_entries(
                 if trigger_right:
                     _trigger_right_box(trigger_right)
                     _print_acevision_recommendation(object_type, trigger_right)
+                elif _is_read_only_ace(mask):
+                    _trigger_right_box("Informational")
+                    _print_informational_advisor(object_type, rights)
 
                 print("")
 
             except Exception as e:
+                # With --filter-sid, keep real processing errors visible because they may hide findings.
                 print(f"    [!] Error processing ACE: {e}")
 
+        # Noise reduction: when filtering by SID, do not print every object where the SID was absent.
         if filter_sid and not printed:
-            print(f"    [!] No ACEs referencing SID {filter_sid} were found on this object.")
-        elif not printed:
+            continue
+        elif not filter_sid and not printed:
+            print(f"[ACL] {dn}")
+            _object_type_box(object_type)
             print("    [!] No relevant ACEs to display with the current filters.")
 
+    if filter_sid and findings_found == 0:
+        print("")
+        print(_c("[SUMMARY]", "cyan"))
+        print(f"  No ACEs found for SID: {filter_sid}")
+        print("  No control relationships identified.")
+    elif filter_sid:
+        print("")
+        print(_c("[SUMMARY]", "cyan"))
+        print(f"  Objects with matching ACEs: {objects_with_findings}")
+        print(f"  Matching ACEs found:       {findings_found}")
 
 def enumerate_acls_for_sid(
     sock,
@@ -1061,8 +1188,6 @@ def decode_mask(mask: int) -> List[str]:
 
 def summarize_mask(mask: int, bh_compat: bool = True) -> dict:
     return _key_rights(mask, bh_compat)
-
-
 
 
 
