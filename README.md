@@ -14,7 +14,7 @@ Instead of only displaying attack paths, ACEVision parses live LDAP security des
 - Recommended Abuse Paths
 - Potential Outcomes
 - Suggested Attack Flows
-## Demo Video
+
 
 
 
