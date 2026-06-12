@@ -1,11 +1,9 @@
-
-
-
 # -*- coding: utf-8 -*-
 #
 # ACEVision - Active Directory ACE analysis engine
 #
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+import time
 import uuid
 
 try:
@@ -182,6 +180,320 @@ def _resolve_sid_safe(sid: str, resolver: Optional[Callable[[str], str]]) -> str
         return resolver(sid) or sid
     except Exception:
         return sid
+
+
+def _ldap_value_to_text(value: Any) -> str:
+    """Safely convert LDAP attribute values to display text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore")
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _ldap_attr_values(entry: Any, attr_name: str) -> List[Any]:
+    """
+    Best-effort LDAP entry attribute extraction.
+
+    Supports common shapes returned by Impacket LDAPConnection.search(), custom
+    wrapper dicts, and ldap3-like entries. This keeps parse_acl.py independent
+    from the exact socket/wrapper implementation.
+    """
+    wanted = attr_name.lower()
+
+    # ldap3 style: entry[attr].values or entry[attr].value
+    try:
+        attr = entry[attr_name]
+        vals = getattr(attr, "values", None)
+        if vals is not None:
+            return list(vals)
+        val = getattr(attr, "value", None)
+        if val is not None:
+            return [val]
+    except Exception:
+        pass
+
+    # dict-style attributes/raw_attributes
+    if isinstance(entry, dict):
+        for container_name in ("attributes", "raw_attributes"):
+            attrs = entry.get(container_name)
+            if isinstance(attrs, dict):
+                for k, v in attrs.items():
+                    if str(k).lower() == wanted:
+                        if isinstance(v, (list, tuple)):
+                            return list(v)
+                        return [v]
+
+        # direct dict key
+        for k, v in entry.items():
+            if str(k).lower() == wanted:
+                if isinstance(v, (list, tuple)):
+                    return list(v)
+                return [v]
+
+    # Impacket SearchResultEntry shape: entry['attributes'] -> list of attrs
+    try:
+        attrs = entry["attributes"]
+        for a in attrs:
+            try:
+                atype = _ldap_value_to_text(a["type"]).lower()
+                if atype != wanted:
+                    continue
+                vals = a["vals"]
+                return list(vals)
+            except Exception:
+                try:
+                    atype = _ldap_value_to_text(getattr(a, "type", "")).lower()
+                    if atype == wanted:
+                        vals = getattr(a, "vals", [])
+                        return list(vals)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # ldap3 entry_attributes_as_dict
+    try:
+        attrs = getattr(entry, "entry_attributes_as_dict", {})
+        for k, v in attrs.items():
+            if str(k).lower() == wanted:
+                if isinstance(v, (list, tuple)):
+                    return list(v)
+                return [v]
+    except Exception:
+        pass
+
+    return []
+
+
+def _ldap_attr_first(entry: Any, attr_name: str) -> str:
+    vals = _ldap_attr_values(entry, attr_name)
+    if not vals:
+        return ""
+    return _ldap_value_to_text(vals[0]).strip()
+
+
+def _ldap_entry_dn(entry: Any) -> str:
+    """Best-effort DN extraction from common LDAP result shapes."""
+    for attr in ("distinguishedName", "distinguishedname"):
+        val = _ldap_attr_first(entry, attr)
+        if val:
+            return val
+
+    if isinstance(entry, dict):
+        for key in ("dn", "entry_dn", "objectName"):
+            if entry.get(key):
+                return _ldap_value_to_text(entry.get(key)).strip()
+
+    for attr in ("entry_dn", "dn"):
+        try:
+            val = getattr(entry, attr)
+            if val:
+                return _ldap_value_to_text(val).strip()
+        except Exception:
+            pass
+
+    try:
+        val = entry["objectName"]
+        if val:
+            return _ldap_value_to_text(val).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+def _sid_to_ldap_filter_value(sid: str) -> Optional[str]:
+    """
+    Convert canonical SID string to escaped binary LDAP filter value.
+
+    LDAP objectSid is stored as binary, so the reliable filter form is:
+      (objectSid=\01\05...)
+    """
+    try:
+        parts = sid.split("-")
+        if len(parts) < 4 or parts[0] != "S":
+            return None
+
+        revision = int(parts[1])
+        identifier_authority = int(parts[2])
+        sub_auths = [int(x) for x in parts[3:]]
+
+        raw = bytearray()
+        raw.append(revision & 0xFF)
+        raw.append(len(sub_auths) & 0xFF)
+        raw.extend(identifier_authority.to_bytes(6, "big", signed=False))
+        for sub in sub_auths:
+            raw.extend(sub.to_bytes(4, "little", signed=False))
+
+        return "".join(f"\\{b:02x}" for b in raw)
+    except Exception:
+        return None
+
+
+def _domain_dn_from_dn(dn: str) -> str:
+    """Extract DC=example,DC=local from any DN."""
+    if not dn:
+        return ""
+    dc_parts = [p.strip() for p in dn.split(",") if p.strip().lower().startswith("dc=")]
+    return ",".join(dc_parts)
+
+
+def _domain_dn_from_entries(entries: Iterable[Tuple]) -> str:
+    for entry in entries:
+        try:
+            dn = entry[0]
+            base = _domain_dn_from_dn(dn)
+            if base:
+                return base
+        except Exception:
+            pass
+    return ""
+
+
+def _ldap_search_one(sock: Any, base_dn: str, ldap_filter: str, attributes: List[str]) -> Optional[Any]:
+    """
+    Search LDAP through either ACEVision's socket wrapper or the underlying
+    LDAP connection. Returns the first result if available.
+    """
+    if not sock or not base_dn or not ldap_filter:
+        return None
+
+    candidates = [sock]
+    for attr in (
+        "ldap_connection",
+        "ldap_conn",
+        "connection",
+        "conn",
+        "ldap",
+        "_ldap_connection",
+    ):
+        try:
+            obj = getattr(sock, attr, None)
+            if obj and obj not in candidates:
+                candidates.append(obj)
+        except Exception:
+            pass
+
+    for conn in candidates:
+        search = getattr(conn, "search", None)
+        if not callable(search):
+            continue
+
+        attempts = (
+            lambda: search(searchBase=base_dn, searchFilter=ldap_filter, attributes=attributes, sizeLimit=1),
+            lambda: search(searchFilter=ldap_filter, searchBase=base_dn, attributes=attributes, sizeLimit=1),
+            lambda: search(base_dn, ldap_filter, attributes=attributes, sizeLimit=1),
+            lambda: search(base_dn, ldap_filter, attributes),
+        )
+
+        for attempt in attempts:
+            try:
+                results = attempt()
+                if not results:
+                    continue
+                if isinstance(results, tuple):
+                    # Some wrappers return (success, results) or (results, controls)
+                    for item in results:
+                        if isinstance(item, (list, tuple)) and item:
+                            return item[0]
+                    continue
+                if isinstance(results, (list, tuple)):
+                    return results[0] if results else None
+                return results
+            except TypeError:
+                continue
+            except Exception:
+                continue
+
+    return None
+
+
+def _principal_details_from_ldap_entry(entry: Any, sid: str) -> Optional[Dict[str, Any]]:
+    if not entry:
+        return None
+
+    dn = _ldap_entry_dn(entry)
+    object_classes = [_ldap_value_to_text(v).strip() for v in _ldap_attr_values(entry, "objectClass")]
+    object_classes = [c for c in object_classes if c]
+
+    name = (
+        _ldap_attr_first(entry, "sAMAccountName")
+        or _ldap_attr_first(entry, "cn")
+        or _ldap_attr_first(entry, "name")
+        or dn
+        or sid
+    )
+
+    object_type = _classify_object_type(object_classes, dn)
+    principal_type = _format_object_type_label(object_type)
+
+    return {
+        "sid": sid,
+        "name": name,
+        "dn": dn,
+        "object_classes": object_classes,
+        "object_type": object_type,
+        "principal_type": principal_type,
+    }
+
+
+def _resolve_principal_details_via_ldap(sock: Any, sid: str, base_dn: str) -> Optional[Dict[str, Any]]:
+    sid_filter = _sid_to_ldap_filter_value(sid)
+    if not sid_filter:
+        return None
+
+    ldap_filter = f"(objectSid={sid_filter})"
+    attrs = ["sAMAccountName", "cn", "name", "distinguishedName", "objectClass", "objectSid"]
+    entry = _ldap_search_one(sock, base_dn, ldap_filter, attrs)
+    return _principal_details_from_ldap_entry(entry, sid)
+
+
+def _make_principal_details_resolver(
+    sock: Any,
+    entries: Iterable[Tuple],
+    name_resolver: Optional[Callable[[str], str]] = None,
+) -> Callable[[str], Dict[str, Any]]:
+    """
+    Build a cached SID -> LDAP object resolver.
+
+    This is the global fix: every ACE principal SID can now become an object-aware
+    principal with name, DN, objectClass, and object type.
+    """
+    entries_list = list(entries)
+    base_dn = _domain_dn_from_entries(entries_list)
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    def resolver(sid: str) -> Dict[str, Any]:
+        if sid in cache:
+            return cache[sid]
+
+        details = _resolve_principal_details_via_ldap(sock, sid, base_dn)
+
+        if not details:
+            resolved_name = _resolve_sid_safe(sid, name_resolver)
+            fallback_type = _classify_principal_type(resolved_name, sid)
+            if fallback_type == "Unknown Object":
+                fallback_type = "Unresolved"
+            details = {
+                "sid": sid,
+                "name": resolved_name,
+                "dn": "",
+                "object_classes": [],
+                "object_type": "Unknown",
+                "principal_type": fallback_type,
+            }
+
+        cache[sid] = details
+        return details
+
+    # Expose the materialized entries so enumerate_acls_for_sid can avoid
+    # consuming a generator twice.
+    resolver.entries = entries_list  # type: ignore[attr-defined]
+    return resolver
 
 
 def _is_dn_under(dn: str, base_dn: str) -> bool:
@@ -362,6 +674,87 @@ def _classify_object_type(object_classes, dn: str = "") -> str:
 
     return "Unknown"
 
+
+
+def _classify_principal_type(resolved_sid: str, sid: str = "") -> str:
+    """
+    Best-effort classification of the ACE principal.
+
+    The target object type is known from LDAP objectClass. The principal comes
+    from the ACE SID, so unless the SID resolver also returns LDAP objectClass,
+    this function uses safe heuristics from the resolved name/SID.
+
+    Future improvement: extend the SID resolver to return both name and
+    objectClass so this can classify User/Group/Computer with LDAP certainty.
+    """
+    val = (resolved_sid or sid or "").strip()
+    val_l = val.lower()
+
+    if not val_l:
+        return "Unknown Object"
+
+    # Computer accounts conventionally end in $.
+    if val_l.endswith("$"):
+        return "Computer Object"
+
+    # Common built-in/domain groups and SID patterns.
+    group_keywords = (
+        "domain admins",
+        "enterprise admins",
+        "schema admins",
+        "domain users",
+        "domain computers",
+        "domain controllers",
+        "cert publishers",
+        "account operators",
+        "server operators",
+        "backup operators",
+        "print operators",
+        "dnsadmins",
+        "remote management users",
+        "remote desktop users",
+    )
+    if any(k in val_l for k in group_keywords):
+        return "Group Object"
+
+    # Well-known/domain relative IDs that are groups.
+    group_rids = ("-512", "-513", "-514", "-515", "-516", "-517", "-518", "-519", "-520")
+    if (sid or val).endswith(group_rids):
+        return "Group Object"
+
+    # If it resolved as DOMAIN\name and is not a known computer/group, user is
+    # the most useful default for operator output.
+    if "\\" in val:
+        return "User Object"
+
+    return "Unknown Object"
+
+
+def _format_object_type_label(object_type: str) -> str:
+    """Normalize object type labels for human-readable output."""
+    safe = object_type or "Unknown"
+    if safe in ("Unknown", "Unknown Object", "Unresolved"):
+        return "Unresolved"
+    if safe.endswith("Object"):
+        return safe
+    return f"{safe} Object"
+
+
+def _format_target_type(object_type: str) -> str:
+    return _format_object_type_label(object_type)
+
+
+def _target_display_name(record: dict) -> str:
+    """Return a short target name for critical finding banners."""
+    dn = record.get("dn", "") or ""
+    if _is_domain_dn(dn):
+        return "Domain"
+
+    # Prefer CN/OU/DC leading component instead of the full DN for the banner.
+    first = dn.split(",", 1)[0] if dn else "Unknown"
+    if "=" in first:
+        return first.split("=", 1)[1]
+    return first or "Unknown"
 
 
 def _c(text: str, color: str) -> str:
@@ -911,25 +1304,633 @@ def _print_acevision_recommendation(object_type: str, right_found: str) -> None:
     _advisor_box_lines()
     print(f"      {_c('No advisor rule available yet for this right.', 'yellow')}")
 
+
+# ==================================================
+# ACEVision Findings Summary Engine
+# ==================================================
+
+def _severity_for_finding(object_type: str, trigger_right: str) -> str:
+    """Rank effective ACEVision findings for operator-first output."""
+    obj = (object_type or "Unknown").lower()
+    right = (trigger_right or "").lower()
+
+    if obj == "domain" and right in ("dcsync", "genericall", "writedacl", "writeowner"):
+        return "CRITICAL"
+    if right == "dcsync":
+        return "CRITICAL"
+    if right == "genericall":
+        return "CRITICAL" if obj == "domain" else "HIGH"
+    if right in ("writedacl", "writeowner", "forcechangepassword"):
+        return "HIGH"
+    if right == "genericwrite":
+        return "MEDIUM"
+    if right == "informational":
+        return "LOW"
+    return "LOW"
+
+
+def _severity_color(severity: str) -> str:
+    s = (severity or "").upper()
+    if s == "CRITICAL":
+        return "red"
+    if s == "HIGH":
+        return "yellow"
+    if s == "MEDIUM":
+        return "yellow"
+    if s == "LOW":
+        return "green"
+    return "white"
+
+
+def _finding_sort_key(finding: dict) -> int:
+    """Lower number means higher priority."""
+    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    right_order = {
+        "DCSync": 0,
+        "GenericAll": 1,
+        "WriteDACL": 2,
+        "WriteOwner": 3,
+        "ForceChangePassword": 4,
+        "GenericWrite": 5,
+        "Informational": 99,
+    }
+    return (
+        severity_order.get(finding.get("severity", "LOW"), 9) * 100
+        + right_order.get(finding.get("right", ""), 50)
+    )
+
+
+def _is_domain_dn(dn: str) -> bool:
+    """Return True for root domain DN like DC=spookysec,DC=local."""
+    dn_l = (dn or "").lower()
+    if not dn_l.startswith("dc="):
+        return False
+    return all(part.strip().startswith("dc=") for part in dn_l.split(","))
+
+
+def _normalize_findings_for_summary(findings: List[dict]) -> List[dict]:
+    """
+    Convert raw ACE findings into attack-path findings.
+
+    Important: DCSync and domain GenericAll are domain-control paths.
+    If those are present on the root domain object, inherited/effective copies
+    on child containers, OUs, users, groups, DNS objects, etc. are noise.
+    """
+    if not findings:
+        return []
+
+    domain_dcsync = [
+        f for f in findings
+        if f.get("right") == "DCSync"
+        and (f.get("object_type") == "Domain" or _is_domain_dn(f.get("dn", "")))
+    ]
+    domain_genericall = [
+        f for f in findings
+        if f.get("right") == "GenericAll"
+        and (f.get("object_type") == "Domain" or _is_domain_dn(f.get("dn", "")))
+    ]
+
+    normalized: List[dict] = []
+
+    # Keep one DCSync finding for the domain. This prevents inherited/effective
+    # DCSync ACEs from flooding the summary for every child object.
+    if domain_dcsync:
+        best = sorted(domain_dcsync, key=_finding_sort_key)[0].copy()
+        best["object_type"] = "Domain"
+        best["severity"] = "CRITICAL"
+        normalized.append(best)
+
+    # Keep one GenericAll domain-control finding when present.
+    if domain_genericall:
+        best = sorted(domain_genericall, key=_finding_sort_key)[0].copy()
+        best["object_type"] = "Domain"
+        best["severity"] = "CRITICAL"
+        normalized.append(best)
+
+    for f in findings:
+        right = f.get("right")
+
+        # Domain-level DCSync already explains the attack path.
+        if right == "DCSync" and domain_dcsync:
+            continue
+
+        # Domain GenericAll already dominates child-object GenericAll noise.
+        if right == "GenericAll" and domain_genericall and f.get("object_type") != "Domain":
+            continue
+
+        # Avoid re-adding the exact domain findings already normalized above.
+        if right == "DCSync" and f in domain_dcsync:
+            continue
+        if right == "GenericAll" and f in domain_genericall:
+            continue
+
+        normalized.append(f)
+
+    return normalized
+
+
+def _dedupe_findings(findings: List[dict]) -> List[dict]:
+    """Collapse duplicate summary findings into one line per attack path."""
+    seen = set()
+    unique = []
+
+    for finding in sorted(_normalize_findings_for_summary(findings), key=_finding_sort_key):
+        key = (
+            finding.get("right"),
+            finding.get("object_type"),
+            finding.get("dn"),
+            finding.get("sid"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+
+    return unique
+
+
+def _print_findings_summary(
+    principal: str,
+    findings: List[dict],
+    total_matching_aces: int,
+    objects_with_findings: int,
+    verbose: bool = False,
+) -> None:
+    """Print the operator-first ACEVision summary before raw ACE detail."""
+    unique_findings = _dedupe_findings(findings)
+
+    print("")
+    print(_c("═══════════════════════════════════════", "red"))
+    print(_c("🔥 ACEVision Findings Summary", "red"))
+    print(_c("═══════════════════════════════════════", "red"))
+    print("")
+    print(f"Principal: {principal or 'N/A'}")
+    principal_types = sorted({
+        f.get("principal_type", "Unresolved")
+        for f in unique_findings
+        if f.get("principal_type")
+    })
+    if len(principal_types) == 1:
+        print(f"Principal Type: {principal_types[0]}")
+    elif len(principal_types) > 1:
+        print(f"Principal Type: Mixed ({', '.join(principal_types)})")
+    print("")
+
+    for severity in ("CRITICAL", "HIGH", "MEDIUM"):
+        group = [f for f in unique_findings if f.get("severity") == severity]
+        print(_c(severity, _severity_color(severity)))
+        print("────────" if severity == "CRITICAL" else "────")
+        if group:
+            for f in group:
+                right = f.get("right", "Unknown")
+                obj = f.get("object_type", "Unknown")
+                dn = f.get("dn", "")
+                print(f"✅ {right} ({obj})")
+                if dn:
+                    print(_c(f"   ↳ {dn}", "dim"))
+        else:
+            print("None")
+        print("")
+
+    print(f"Objects with matching ACEs: {objects_with_findings}")
+    print(f"Matching ACEs Found:       {total_matching_aces}")
+    print("")
+
+    if unique_findings:
+        print("Summary shows deduplicated attack paths, not every inherited/effective ACE.")
+
+    if verbose:
+        print("Verbose mode enabled: full ACE details below.")
+    else:
+        print("Run with --verbose to display full ACE details.")
+
+    print(_c("═══════════════════════════════════════", "red"))
+    print("")
+
+
+def _print_default_advisor_blocks(findings: List[dict]) -> None:
+    """
+    Print ACEVision Advisor blocks in default mode without raw ACE noise.
+
+    Default mode should still explain the path. It should only suppress
+    verbose evidence such as raw ACE type, mask, GUID, and key-right details.
+    """
+    unique_findings = _dedupe_findings(findings)
+
+    # Advisor de-confliction:
+    # If the same principal has multiple rights over the same target,
+    # show only the strongest/most direct abuse path. This prevents
+    # duplicate Advisor blocks such as DCSync + GenericAll on the domain.
+    advisor_priority = {
+        "DCSync": 100,
+        "GenericAll": 90,
+        "WriteDACL": 80,
+        "WriteOwner": 70,
+        "GenericWrite": 60,
+        "ForceChangePassword": 50,
+    }
+
+    best_findings = {}
+
+    for finding in unique_findings:
+        key = (
+            finding.get("resolved_sid") or finding.get("sid"),
+            finding.get("dn"),
+            finding.get("object_type"),
+        )
+
+        current = best_findings.get(key)
+
+        if not current:
+            best_findings[key] = finding
+            continue
+
+        new_score = advisor_priority.get(finding.get("right"), 0)
+        old_score = advisor_priority.get(current.get("right"), 0)
+
+        if new_score > old_score:
+            best_findings[key] = finding
+
+    unique_findings = list(best_findings.values())
+
+    actionable_rights = {
+        "DCSync",
+        "GenericAll",
+        "WriteDACL",
+        "WriteOwner",
+        "ForceChangePassword",
+        "GenericWrite",
+    }
+
+    printed_any = False
+
+    for finding in unique_findings:
+        right = finding.get("right")
+        if right not in actionable_rights:
+            continue
+
+        dn = finding.get("dn", "")
+        object_type = finding.get("object_type", "Unknown")
+
+        if not printed_any:
+            print(_c("[ADVISOR] ACEVision Recommended Next Steps", "cyan"))
+            print("")
+            printed_any = True
+
+        if dn:
+            print(f"[ACL] {dn}")
+
+        _object_type_box(object_type)
+        _trigger_right_box(right)
+        _print_acevision_recommendation(object_type, right)
+        print("")
+
+
+def _get_trigger_right(
+    mask: int,
+    object_type_guid: Optional[str],
+    bh_compat: bool = True,
+) -> Optional[str]:
+    """Pick the strongest effective right for advisor/summary output."""
+    kk = _key_rights(mask, bh_compat)
+    is_dcsync = _is_dcsync_guid(object_type_guid)
+    is_force_change_password = _is_force_change_password_guid(object_type_guid)
+
+    if is_dcsync:
+        return "DCSync"
+    if kk["GenericAll_direct"] or kk["GenericAll_derived"]:
+        return "GenericAll"
+    if is_force_change_password:
+        return "ForceChangePassword"
+    if kk["GenericWrite_direct"] or kk["GenericWrite_derived"]:
+        return "GenericWrite"
+    if kk["WriteDACL"]:
+        return "WriteDACL"
+    if kk["WriteOwner"]:
+        return "WriteOwner"
+
+    return None
+
+
+def _build_ace_record(
+    dn: str,
+    object_type: str,
+    ace,
+    resolve_sid: Optional[Callable[[str], str]],
+    bh_compat: bool,
+    resolve_sid_details: Optional[Callable[[str], Dict[str, Any]]] = None,
+) -> dict:
+    """Normalize ACE data once so summary and verbose output use the same facts."""
+    sid = ace["Ace"]["Sid"].formatCanonical()
+    mask = _mask_to_int(ace["Ace"]["Mask"])
+    acetype = ace["AceType"]
+    object_type_guid = _extract_object_type_guid(ace)
+    extended_right = _resolve_extended_right(object_type_guid)
+    friendly_object_label = _resolve_friendly_object_label(object_type_guid)
+    is_dcsync = _is_dcsync_guid(object_type_guid)
+    is_force_change_password = _is_force_change_password_guid(object_type_guid)
+    is_control_access_object_ace = _is_object_ace_with_control_access(ace)
+    rights = _decode_rights(mask)
+    unknown_bits = mask & (~ALL_RIGHTS_MASK)
+    kk = _key_rights(mask, bh_compat)
+    trigger_right = _get_trigger_right(mask, object_type_guid, bh_compat)
+
+    try:
+        ace_flags = hex(ace["Ace"]["Flags"])
+    except Exception:
+        ace_flags = "N/A"
+
+    principal_details: Dict[str, Any] = {}
+    if resolve_sid_details:
+        try:
+            principal_details = resolve_sid_details(sid) or {}
+        except Exception:
+            principal_details = {}
+
+    resolved_sid = (
+        principal_details.get("name")
+        or principal_details.get("resolved_sid")
+        or _resolve_sid_safe(sid, resolve_sid)
+    )
+    principal_type = (
+        principal_details.get("object_type")
+        or principal_details.get("principal_type")
+        or _classify_principal_type(resolved_sid, sid)
+    )
+    if principal_type == "Unknown Object":
+        principal_type = "Unresolved"
+
+    return {
+        "dn": dn,
+        "object_type": object_type,
+        "ace": ace,
+        "sid": sid,
+        "resolved_sid": resolved_sid,
+        "principal_type": principal_type,
+        "principal_dn": principal_details.get("dn", ""),
+        "principal_object_classes": principal_details.get("object_classes", []),
+        "mask": mask,
+        "acetype": acetype,
+        "object_type_guid": object_type_guid,
+        "extended_right": extended_right,
+        "friendly_object_label": friendly_object_label,
+        "is_dcsync": is_dcsync,
+        "is_force_change_password": is_force_change_password,
+        "is_control_access_object_ace": is_control_access_object_ace,
+        "rights": rights,
+        "unknown_bits": unknown_bits,
+        "kk": kk,
+        "trigger_right": trigger_right,
+        "ace_flags": ace_flags,
+    }
+
+
+def _print_ace_record(record: dict) -> None:
+    """Verbose ACE output, preserved from the original parser behavior."""
+    mask = record["mask"]
+    kk = record["kk"]
+    rights = record["rights"]
+    unknown_bits = record["unknown_bits"]
+    trigger_right = record["trigger_right"]
+    object_type = record["object_type"]
+
+    print("  🔐 ACE Summary:")
+    print(f"    ACE Type:       {_ace_type_name(record['acetype'])}")
+    print(f"    SID:            {record['sid']}")
+    print(f"    Resolved SID:   {record['resolved_sid']}")
+    print(f"    Principal Type: {record.get('principal_type', 'Unresolved')}")
+    if record.get("principal_dn"):
+        print(f"    Principal DN:   {record.get('principal_dn')}")
+    print(f"    Mask (hex):     {hex(mask)}")
+    print(f"    ObjectType:     {record['object_type_guid'] or 'N/A'}")
+    print(f"    ACE Flags:      {record['ace_flags']}")
+
+    if record["extended_right"]:
+        print(f"    ExtendedRight:  {record['extended_right']}")
+
+    if record["friendly_object_label"]:
+        print(f"    BloodHound:     {record['friendly_object_label']}")
+
+    if record["is_dcsync"]:
+        print("    [!] DCSync-capable permission detected")
+
+    if record["is_force_change_password"]:
+        print("    [!] ForceChangePassword-capable permission detected")
+
+    if record["is_control_access_object_ace"] and not record["extended_right"]:
+        print("    [i] Object ACE with ControlAccess detected, but GUID was not resolved yet.")
+
+    print("    Rights:")
+
+    if rights:
+        for r in rights:
+            print(f"      ✅ {r}")
+    else:
+        print("      – No classic rights were recognized in this mask")
+
+    if unknown_bits:
+        print(f"      … Unknown bits: {hex(unknown_bits)}")
+
+    print("    Key rights (quick check):")
+    print(_format_bool("  WriteOwner", kk["WriteOwner"]))
+    print(_format_bool("  WriteDACL", kk["WriteDACL"]))
+
+    if kk["GenericAll_direct"]:
+        print(_format_bool("  GenericAll", True, "YES (direct)"))
+    elif kk["GenericAll_derived"]:
+        print(_format_bool("  GenericAll", True, "YES (equivalent)"))
+    else:
+        print(_format_bool("  GenericAll", False))
+
+    if kk["GenericWrite_direct"]:
+        print(_format_bool("  GenericWrite", True, "YES (direct)"))
+    elif kk["GenericWrite_derived"]:
+        print(_format_bool("  GenericWrite", True, "YES (derived)"))
+    else:
+        print(_format_bool("  GenericWrite", False))
+
+    if (not kk["GenericWrite_direct"]) and kk["GenericWrite_derived"]:
+        print("    [i] GenericWrite (derived) inferred from WriteProperty/Self (BH compatibility).")
+
+    if record["is_dcsync"]:
+        print("    [i] This ACE grants critical replication permissions over the domain object.")
+
+    if record["is_force_change_password"]:
+        print("    [i] This ACE grants Reset Password / ForceChangePassword over the user object.")
+
+    if trigger_right:
+        _trigger_right_box(trigger_right)
+        _print_acevision_recommendation(object_type, trigger_right)
+    elif _is_read_only_ace(mask):
+        _trigger_right_box("Informational")
+        _print_informational_advisor(object_type, rights)
+
+    print("")
+
+
+
+
+def _is_critical_attack_path(record: dict) -> bool:
+    """Return True when a finding should be announced immediately during long scans."""
+    right = record.get("trigger_right")
+    object_type = record.get("object_type")
+    dn = record.get("dn", "")
+
+    # Domain-control paths should get early operator feedback.
+    if object_type == "Domain" or _is_domain_dn(dn):
+        return right in ("DCSync", "GenericAll", "WriteDACL", "WriteOwner")
+
+    return False
+
+
+def _print_scan_start_once(state: dict) -> None:
+    """Print the scan-start message once when ACEVision becomes chatty."""
+    if state.get("scan_started_printed"):
+        return
+
+    print("")
+    print(_c("[SCAN] Processing ACLs...", "cyan"), flush=True)
+    state["scan_started_printed"] = True
+
+
+def _print_critical_finding(state: dict, principal: str, record: dict) -> None:
+    """Print the critical finding banner once with object-aware context."""
+    if state.get("critical_announced"):
+        return
+
+    right = record.get("trigger_right", "Unknown")
+    principal_name = principal or record.get("resolved_sid") or record.get("sid") or "Unknown"
+    principal_type = record.get("principal_type", "Unresolved")
+
+    target_object_type = (
+        "Domain"
+        if _is_domain_dn(record.get("dn", ""))
+        else record.get("object_type", "Unknown")
+    )
+    target_name = _target_display_name(record)
+    target_type = _format_target_type(target_object_type)
+
+    print("")
+    print(_c("[🔥] CRITICAL FINDING", "red"), flush=True)
+    print(f"   Principal:      {principal_name}", flush=True)
+    print(f"   Principal Type: {principal_type}", flush=True)
+    if record.get("principal_dn"):
+        print(f"   Principal DN:   {record.get('principal_dn')}", flush=True)
+    print("")
+    print(f"   Right:          {right}", flush=True)
+    print("")
+    print(f"   Target:         {target_name}", flush=True)
+    print(f"   Target Type:    {target_type}", flush=True)
+    print("")
+
+    state["critical_announced"] = True
+
+def _maybe_enable_progress(state: dict, threshold_seconds: float = 5.0) -> None:
+    """
+    Enable heartbeat output only when the scan takes long enough to feel stalled.
+
+    Fast scans stay clean. Slow scans automatically become communicative.
+    If a critical path was found during a fast portion of the scan, store it
+    and only announce it if the scan actually becomes slow.
+    """
+    if state.get("progress_enabled"):
+        return
+
+    elapsed = time.time() - state["start_time"]
+    if elapsed >= threshold_seconds:
+        _print_scan_start_once(state)
+
+        pending = state.get("pending_critical_record")
+        if pending and not state.get("critical_announced"):
+            _print_critical_finding(
+                state,
+                state.get("pending_critical_principal") or "",
+                pending,
+            )
+
+        print(_c("[SCAN] Continuing enumeration...", "cyan"), flush=True)
+        state["progress_enabled"] = True
+
+
+def _announce_critical_once(state: dict, principal: str, record: dict) -> None:
+    """
+    Announce the first critical path only when the scan is already chatty.
+
+    This keeps fast scans clean. If the scan later crosses the slow threshold,
+    the pending critical finding is printed then.
+    """
+    if state.get("critical_announced"):
+        return
+
+    if not _is_critical_attack_path(record):
+        return
+
+    if not state.get("pending_critical_record"):
+        state["pending_critical_record"] = record
+        state["pending_critical_principal"] = principal
+
+    if not state.get("progress_enabled"):
+        return
+
+    _print_scan_start_once(state)
+    _print_critical_finding(state, principal, record)
+
 def parse_acl_entries(
     entries: Iterable[Tuple],
     filter_sid: Optional[str] = None,
     resolve_sid: Optional[Callable[[str], str]] = None,
     only_escalation: bool = False,
     bh_compat: bool = True,
+    verbose: bool = False,
+    resolve_sid_details: Optional[Callable[[str], Dict[str, Any]]] = None,
 ) -> None:
     """
-    Parse and print ACL entries.
+    Parse ACL entries and print an operator-first findings summary.
 
-    Noise reduction behavior:
-    - When --filter-sid is used, ACEVision only prints objects where that SID has a matching ACE.
-    - Empty/non-matching objects are suppressed.
-    - If no matching ACEs are found across the search, print one clean summary message.
+    Default behavior:
+    - Collect matching ACEs.
+    - Print a prioritized, deduplicated ACEVision Findings Summary.
+    - Suppress noisy raw ACE details.
+
+    Verbose behavior:
+    - Print the same summary first.
+    - Then print full ACE evidence and Advisor blocks.
     """
-    findings_found = 0
-    objects_with_findings = 0
+    records: List[dict] = []
+    findings: List[dict] = []
+    object_headers = {}
+    processing_errors: List[str] = []
+
+    # UX state: default output stays quiet for fast scans, but slow/critical scans
+    # receive heartbeat output so users do not think ACEVision is frozen.
+    scan_state = {
+        "start_time": time.time(),
+        "progress_enabled": False,
+        "scan_started_printed": False,
+        "critical_announced": False,
+        "pending_critical_record": None,
+        "pending_critical_principal": None,
+        "objects_processed": 0,
+        "next_object_heartbeat": 500,
+    }
+
+    # Best principal label available before any ACE records are collected.
+    # If --resolve-sids is enabled, this will be replaced later by resolved_sid.
+    principal_hint = filter_sid or "All principals"
 
     for entry_data in entries:
+        scan_state["objects_processed"] += 1
+        _maybe_enable_progress(scan_state)
+
+        if (
+            scan_state.get("progress_enabled")
+            and scan_state["objects_processed"] >= scan_state["next_object_heartbeat"]
+        ):
+            print(
+                _c(f"[SCAN] Processed {scan_state['objects_processed']} objects...", "cyan"),
+                flush=True,
+            )
+            scan_state["next_object_heartbeat"] += 500
         if len(entry_data) == 3:
             dn, sd, object_classes = entry_data
         else:
@@ -937,28 +1938,22 @@ def parse_acl_entries(
             object_classes = []
 
         object_type = _classify_object_type(object_classes, dn)
-
         dacl = _get_dacl(sd)
         aces = getattr(dacl, "aces", None) if dacl is not None else None
 
-        # With --filter-sid, suppress empty objects completely.
-        # Without --filter-sid, keep the old visibility for general debugging/enumeration.
         if not dacl or not aces:
-            if filter_sid:
-                continue
-
-            print(f"[ACL] {dn}")
-            _object_type_box(object_type)
-            try:
-                ctrl = getattr(sd, "Control", 0)
-                present = bool(ctrl & SE_DACL_PRESENT)
-                print(f"    [!] No DACL or no ACEs present (SE_DACL_PRESENT={present})")
-            except Exception:
-                print("    [!] No DACL or no ACEs present")
+            if verbose and not filter_sid:
+                print(f"[ACL] {dn}")
+                _object_type_box(object_type)
+                try:
+                    ctrl = getattr(sd, "Control", 0)
+                    present = bool(ctrl & SE_DACL_PRESENT)
+                    print(f"    [!] No DACL or no ACEs present (SE_DACL_PRESENT={present})")
+                except Exception:
+                    print("    [!] No DACL or no ACEs present")
             continue
 
-        printed = False
-        header_printed = False
+        object_had_record = False
 
         for ace in aces:
             try:
@@ -967,167 +1962,115 @@ def parse_acl_entries(
                 if filter_sid and sid != filter_sid:
                     continue
 
-                mask = _mask_to_int(ace["Ace"]["Mask"])
-                acetype = ace["AceType"]
-                object_type_guid = _extract_object_type_guid(ace)
-                extended_right = _resolve_extended_right(object_type_guid)
-                friendly_object_label = _resolve_friendly_object_label(object_type_guid)
-
-                is_dcsync = _is_dcsync_guid(object_type_guid)
-                is_force_change_password = _is_force_change_password_guid(object_type_guid)
-                is_control_access_object_ace = _is_object_ace_with_control_access(ace)
+                record = _build_ace_record(
+                    dn,
+                    object_type,
+                    ace,
+                    resolve_sid,
+                    bh_compat,
+                    resolve_sid_details=resolve_sid_details,
+                )
 
                 if only_escalation:
                     if not (
-                        _should_print_ace(mask, only_escalation, bh_compat, object_type_guid)
-                        or is_control_access_object_ace
+                        _should_print_ace(
+                            record["mask"],
+                            only_escalation,
+                            bh_compat,
+                            record["object_type_guid"],
+                        )
+                        or record["is_control_access_object_ace"]
                     ):
                         continue
 
-                if not header_printed:
-                    print(f"[ACL] {dn}")
-                    _object_type_box(object_type)
-                    header_printed = True
-                    objects_with_findings += 1
+                records.append(record)
+                object_had_record = True
+                object_headers[dn] = object_type
 
-                printed = True
-                findings_found += 1
-                rights = _decode_rights(mask)
-                unknown_bits = mask & (~ALL_RIGHTS_MASK)
+                if records and principal_hint == (filter_sid or "All principals"):
+                    principal_hint = record.get("resolved_sid") or principal_hint
 
-                print("  🔐 ACE Summary:")
-                print(f"    ACE Type:       {_ace_type_name(acetype)}")
-                print(f"    SID:            {sid}")
-
-                resolved = _resolve_sid_safe(sid, resolve_sid)
-                print(f"    Resolved SID:   {resolved}")
-                print(f"    Mask (hex):     {hex(mask)}")
-                print(f"    ObjectType:     {object_type_guid or 'N/A'}")
-
-                try:
-                    print(f"    ACE Flags:      {hex(ace['Ace']['Flags'])}")
-                except Exception:
-                    print("    ACE Flags:      N/A")
-
-                if extended_right:
-                    print(f"    ExtendedRight:  {extended_right}")
-
-                if friendly_object_label:
-                    print(f"    BloodHound:     {friendly_object_label}")
-
-                if is_dcsync:
-                    print("    [!] DCSync-capable permission detected")
-
-                if is_force_change_password:
-                    print("    [!] ForceChangePassword-capable permission detected")
-
-                if is_control_access_object_ace and not extended_right:
-                    print("    [i] Object ACE with ControlAccess detected, but GUID was not resolved yet.")
-
-                print("    Rights:")
-
-                if rights:
-                    for r in rights:
-                        print(f"      ✅ {r}")
-                else:
-                    print("      – No classic rights were recognized in this mask")
-
-                if unknown_bits:
-                    print(f"      … Unknown bits: {hex(unknown_bits)}")
-
-                kk = _key_rights(mask, bh_compat)
-
-                print("    Key rights (quick check):")
-                print(_format_bool("  WriteOwner", kk["WriteOwner"]))
-                print(_format_bool("  WriteDACL", kk["WriteDACL"]))
-
-                if kk["GenericAll_direct"]:
-                    print(_format_bool("  GenericAll", True, "YES (direct)"))
-                elif kk["GenericAll_derived"]:
-                    print(_format_bool("  GenericAll", True, "YES (equivalent)"))
-                else:
-                    print(_format_bool("  GenericAll", False))
-
-                if kk["GenericWrite_direct"]:
-                    print(_format_bool("  GenericWrite", True, "YES (direct)"))
-                elif kk["GenericWrite_derived"]:
-                    print(_format_bool("  GenericWrite", True, "YES (derived)"))
-                else:
-                    print(_format_bool("  GenericWrite", False))
-
-                if (not kk["GenericWrite_direct"]) and kk["GenericWrite_derived"]:
-                    print("    [i] GenericWrite (derived) inferred from WriteProperty/Self (BH compatibility).")
-
-                if is_dcsync:
-                    print("    [i] This ACE grants critical replication permissions over the domain object.")
-
-                if is_force_change_password:
-                    print("    [i] This ACE grants Reset Password / ForceChangePassword over the user object.")
-
-                #
-                # ACEVision Advisor Priority Engine
-                #
-                # Prefer the strongest effective right over lower-level precursor rights.
-                # Example: if an ACE contains WriteOwner + WriteDACL + GenericAll,
-                # the advisor should explain GenericAll abuse directly instead of
-                # recommending another DACL modification.
-                #
-                trigger_right = None
-
-                if is_dcsync:
-                    trigger_right = "DCSync"
-                elif kk["GenericAll_direct"] or kk["GenericAll_derived"]:
-                    trigger_right = "GenericAll"
-                elif is_force_change_password:
-                    trigger_right = "ForceChangePassword"
-                elif kk["GenericWrite_direct"] or kk["GenericWrite_derived"]:
-                    trigger_right = "GenericWrite"
-                elif kk["WriteDACL"]:
-                    trigger_right = "WriteDACL"
-                elif kk["WriteOwner"]:
-                    trigger_right = "WriteOwner"
-
+                trigger_right = record["trigger_right"]
                 if trigger_right:
-                    _trigger_right_box(trigger_right)
-                    _print_acevision_recommendation(object_type, trigger_right)
-                elif _is_read_only_ace(mask):
-                    _trigger_right_box("Informational")
-                    _print_informational_advisor(object_type, rights)
-
-                print("")
+                    _announce_critical_once(scan_state, principal_hint, record)
+                    findings.append(
+                        {
+                            "dn": dn,
+                            "object_type": object_type,
+                            "right": trigger_right,
+                            "severity": _severity_for_finding(object_type, trigger_right),
+                            "sid": record["sid"],
+                            "resolved_sid": record["resolved_sid"],
+                            "principal_type": record.get("principal_type", "Unresolved"),
+                            "principal_dn": record.get("principal_dn", ""),
+                        }
+                    )
 
             except Exception as e:
-                # With --filter-sid, keep real processing errors visible because they may hide findings.
-                print(f"    [!] Error processing ACE: {e}")
+                processing_errors.append(f"{dn}: {e}")
 
-        # Noise reduction: when filtering by SID, do not print every object where the SID was absent.
-        if filter_sid and not printed:
-            continue
-        elif not filter_sid and not printed:
+        if verbose and not filter_sid and not object_had_record:
             print(f"[ACL] {dn}")
             _object_type_box(object_type)
             print("    [!] No relevant ACEs to display with the current filters.")
 
-    if filter_sid and findings_found == 0:
+    if filter_sid:
+        principal = filter_sid
+        if records:
+            principal = records[0].get("resolved_sid") or filter_sid
+    else:
+        principal = "All principals"
+
+    if not records:
         print("")
         print(_c("[SUMMARY]", "cyan"))
-        print(f"  No ACEs found for SID: {filter_sid}")
-        print("  No control relationships identified.")
-    elif filter_sid:
+        if filter_sid:
+            print(f"  No ACEs found for SID: {filter_sid}")
+            print("  No control relationships identified.")
+        else:
+            print("  No ACEs matched the current filters.")
+        return
+
+    _print_findings_summary(
+        principal=principal,
+        findings=findings,
+        total_matching_aces=len(records),
+        objects_with_findings=len(object_headers),
+        verbose=verbose,
+    )
+
+    if processing_errors and verbose:
+        print(_c("[WARNINGS]", "yellow"))
+        for err in processing_errors:
+            print(f"  [!] Error processing ACE: {err}")
         print("")
-        print(_c("[SUMMARY]", "cyan"))
-        print(f"  Objects with matching ACEs: {objects_with_findings}")
-        print(f"  Matching ACEs found:       {findings_found}")
+
+    if not verbose:
+        _print_default_advisor_blocks(findings)
+        return
+
+    current_dn = None
+    for record in records:
+        dn = record["dn"]
+        if dn != current_dn:
+            current_dn = dn
+            print(f"[ACL] {dn}")
+            _object_type_box(record["object_type"])
+
+        _print_ace_record(record)
+
 
 def enumerate_acls_for_sid(
     sock,
     filter_sid: Optional[str],
     target_dn: Optional[str] = None,
     resolve_sid: Optional[Callable[[str], str]] = None,
+    resolve_sid_details: Optional[Callable[[str], Dict[str, Any]]] = None,
     only_escalation: bool = False,
     bh_compat: bool = True,
+    verbose: bool = False,
 ) -> None:
-    entries = sock.get_effective_control_entries()
+    entries = list(sock.get_effective_control_entries())
 
     if target_dn:
         entries = [
@@ -1136,14 +2079,22 @@ def enumerate_acls_for_sid(
             if _is_dn_under(entry[0], target_dn)
         ]
 
-    parse_acl_entries(
-        entries,
-        filter_sid,
-        resolve_sid,
-        only_escalation,
-        bh_compat
-    )
+    if resolve_sid_details is None:
+        resolve_sid_details = _make_principal_details_resolver(
+            sock=sock,
+            entries=entries,
+            name_resolver=resolve_sid,
+        )
 
+    parse_acl_entries(
+        entries=entries,
+        filter_sid=filter_sid,
+        resolve_sid=resolve_sid,
+        only_escalation=only_escalation,
+        bh_compat=bh_compat,
+        verbose=verbose,
+        resolve_sid_details=resolve_sid_details,
+    )
 
 def check_writeowner_for_dn(sock, target_dn: str, sid: str) -> bool:
     entries = sock.get_effective_control_entries()
@@ -1188,8 +2139,3 @@ def decode_mask(mask: int) -> List[str]:
 
 def summarize_mask(mask: int, bh_compat: bool = True) -> dict:
     return _key_rights(mask, bh_compat)
-
-
-
-
-

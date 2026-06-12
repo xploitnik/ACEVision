@@ -1,13 +1,9 @@
 # certipy_tool/auth.py
 # -*- coding: utf-8 -*-
 #
-# LDAP socket for ACEVision:
-#  - NTLM simple bind (DOMAIN\user) on ldap:// or ldaps://
-#  - Kerberos SASL/GSSAPI bind using the caller's ccache (kinit / KRB5CCNAME)
-#  - get_effective_control_entries(): returns [(dn, SR_SECURITY_DESCRIPTOR)]
-#  - resolve_sid(sid): tries to resolve SIDs to names by searching objectSid (binary)
+# LDAP socket for ACEVision
 #
-from typing import List, Tuple, Optional
+from typing import Optional
 import os
 
 from ldap3 import Server, Connection, ALL, NTLM, SUBTREE, SASL, GSSAPI
@@ -16,9 +12,44 @@ from impacket.ldap.ldaptypes import SR_SECURITY_DESCRIPTOR, LDAP_SID
 
 
 def domain_to_base_dn(domain: str) -> str:
-    # "certified.htb" -> "DC=certified,DC=htb"
     parts = [p for p in domain.split(".") if p]
     return ",".join(f"DC={p}" for p in parts)
+
+
+def classify_ldap_object_type(object_classes, dn: str = "") -> str:
+    classes = [str(c).lower() for c in (object_classes or [])]
+    dn_l = (dn or "").lower()
+
+    if "domaindns" in classes:
+        return "Domain Object"
+
+    if "grouppolicycontainer" in classes:
+        return "GPO Object"
+
+    if "pkicertificatetemplate" in classes:
+        return "Certificate Template Object"
+
+    if "organizationalunit" in classes:
+        return "OU Object"
+
+    # Computer includes "user", so computer must come before user.
+    if "computer" in classes:
+        return "Computer Object"
+
+    if "group" in classes:
+        return "Group Object"
+
+    if "user" in classes:
+        return "User Object"
+
+    if dn_l.startswith("dc=") and all(part.strip().startswith("dc=") for part in dn_l.split(",")):
+        return "Domain Object"
+
+    # Generic fallback for normal account objects when objectClass parsing fails.
+    if dn_l.startswith("cn=") and "dc=" in dn_l:
+        return "User Object"
+
+    return "Unresolved"
 
 
 class LDAPSocket:
@@ -37,24 +68,6 @@ class LDAPSocket:
         network_timeout: int = 10,
         disable_referrals: bool = True,
     ):
-        """
-        ACEVision LDAP wrapper.
-
-        Supports:
-        - NTLM authentication
-        - Kerberos authentication through SASL/GSSAPI
-        - LDAP, LDAPS, and optional StartTLS
-        - Security descriptor retrieval
-        - SID resolution
-
-        target: host/IP or FQDN to connect to
-        username/password: used for NTLM only
-        domain: domain FQDN, e.g. certified.htb
-        auth_method: "ntlm" or "kerberos"
-        ccache: optional Kerberos ccache path
-        dc_fqdn: preferred FQDN for Kerberos SPN ldap/<fqdn>
-        starttls: negotiate StartTLS on LDAP 389 if not using LDAPS
-        """
         self.target = target
         self.username = username or ""
         self.password = password or ""
@@ -136,10 +149,6 @@ class LDAPSocket:
             pass
 
     def get_effective_control_entries(self):
-        """
-        Return a list of (DN, SR_SECURITY_DESCRIPTOR, object_classes) for the domain subtree.
-        Only requests the DACL (sdflags=0x04) plus objectClass for ACEVision Advisor.
-        """
         controls = security_descriptor_control(sdflags=0x04)
         who = self.username or "kerberos"
 
@@ -159,12 +168,14 @@ class LDAPSocket:
             try:
                 raw_sd = entry["nTSecurityDescriptor"].raw_values[0]
                 sd = SR_SECURITY_DESCRIPTOR(raw_sd)
-                object_classes = []
 
                 try:
-                    object_classes = list(entry["objectClass"].values)
+                    object_classes = [str(c) for c in entry["objectClass"].values]
                 except Exception:
-                    object_classes = []
+                    try:
+                        object_classes = [str(c) for c in entry.objectClass.values]
+                    except Exception:
+                        object_classes = []
 
                 entries.append((entry.entry_dn, sd, object_classes))
             except Exception:
@@ -172,44 +183,101 @@ class LDAPSocket:
 
         return entries
 
+    def _sid_to_ldap_filter(self, sid_str: str) -> str:
+        sid_obj = LDAP_SID()
+        sid_obj.fromCanonical(sid_str)
+        sid_bytes = sid_obj.getData()
+        hex_esc = "".join("\\{:02x}".format(b) for b in sid_bytes)
+        return f"(objectSid={hex_esc})"
+
     def resolve_sid(self, sid_str: str) -> str:
         """
-        Try to resolve a SID to sAMAccountName/CN by searching objectSid binary.
-        Returns original SID string on failure.
+        Backward-compatible SID resolver.
+        Returns only a display name.
         """
-        try:
-            sid_obj = LDAP_SID()
-            sid_obj.fromCanonical(sid_str)
-            sid_bytes = sid_obj.getData()
+        details = self.resolve_sid_details(sid_str)
+        return details.get("name") or sid_str
 
-            hex_esc = "".join("\\{:02x}".format(b) for b in sid_bytes)
-            flt = f"(objectSid={hex_esc})"
+    def resolve_sid_details(self, sid_str: str) -> dict:
+        """
+        LDAP-enriched SID resolver.
+
+        Returns:
+          {
+            "sid": "...",
+            "name": "backup",
+            "dn": "CN=backup,OU=Administrator,DC=spookysec,DC=local",
+            "object_classes": ["top", "person", "organizationalPerson", "user"],
+            "object_type": "User Object"
+          }
+        """
+        details = {
+            "sid": sid_str,
+            "name": sid_str,
+            "dn": "",
+            "object_classes": [],
+            "object_type": "Unresolved",
+        }
+
+        try:
+            flt = self._sid_to_ldap_filter(sid_str)
 
             self.conn.search(
                 search_base=self.base_dn,
                 search_filter=flt,
                 search_scope=SUBTREE,
-                attributes=["sAMAccountName", "cn", "distinguishedName"],
+                attributes=[
+                    "sAMAccountName",
+                    "cn",
+                    "distinguishedName",
+                    "objectClass",
+                ],
             )
 
             if not self.conn.entries:
-                return sid_str
+                return details
 
             e = self.conn.entries[0]
 
-            for attr in ("sAMAccountName", "cn", "distinguishedName"):
-                try:
-                    val = str(e[attr])
-                    if val:
-                        return val
-                except Exception:
-                    continue
+            try:
+                sam = str(e["sAMAccountName"])
+                if sam and sam.lower() != "none":
+                    details["name"] = sam
+            except Exception:
+                pass
 
-            return sid_str
+            if details["name"] == sid_str:
+                try:
+                    cn = str(e["cn"])
+                    if cn and cn.lower() != "none":
+                        details["name"] = cn
+                except Exception:
+                    pass
+
+            try:
+                dn = str(e["distinguishedName"])
+                if dn and dn.lower() != "none":
+                    details["dn"] = dn
+            except Exception:
+                try:
+                    details["dn"] = str(e.entry_dn)
+                except Exception:
+                    details["dn"] = ""
+
+            try:
+                details["object_classes"] = [str(c) for c in e["objectClass"].values]
+            except Exception:
+                try:
+                    details["object_classes"] = [str(c) for c in e.objectClass.values]
+                except Exception:
+                    details["object_classes"] = []
+
+            details["object_type"] = classify_ldap_object_type(
+                details["object_classes"],
+                details["dn"],
+            )
+
+            return details
 
         except Exception:
-            return sid_str
-
-
-
-
+            return details
