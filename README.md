@@ -21,29 +21,9 @@ ACEVision supports SID-centric Active Directory analysis by allowing operators t
 
 ---
 
-## Demo
-
-Click the image below to watch the demo.
-
-[![DCSync Demo](docs/images/dcsync-demo.png)](https://github.com/xploitnik/ACEVision/raw/main/docs/videos/dcsync.mp4)
-
----
-
 ## Example Output
 
-```text
-═══════════════════════════════════════
-🔥 ACEVision Findings Summary
-═══════════════════════════════════════
-
-Principal: svc_loanmgr
-Principal Type: User Object
-
-CRITICAL
-────────
-✅ DCSync (Domain)
-   ↳ DC=EGOTISTICAL-BANK,DC=LOCAL
-```
+![Principal Object Detection](docs/images/Sauna%20HTB/ldap-principal-resolution.png)
 
 ACEVision enriches SID-based findings through LDAP resolution, allowing operators to immediately identify the controlling object and its object type.
 
