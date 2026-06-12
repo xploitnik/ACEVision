@@ -43,20 +43,7 @@ Given an ACE, ACEVision can:
 * Explain the expected attack flow
 
 ### Advisor Workflow
-
-```text
-Object Type
-     ↓
-Trigger Right
-     ↓
-ACEVision Advisor
-     ↓
-Recommended DACL
-     ↓
-Potential Outcomes
-     ↓
-Suggested Flow
-```
+![Principal Object Detection](docs/images/Sauna%20HTB/ldap-aceadvisor.png)
 
 Rather than reducing privilege escalation to graph edges and attack paths, ACEVision helps operators, defenders, and students understand why a relationship exists by exposing the underlying ACEs, SIDs, ownership relationships, and effective rights that grant control over Active Directory objects.
 
